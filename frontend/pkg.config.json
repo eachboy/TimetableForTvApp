@@ -1,0 +1,16 @@
+{
+  "pkg": {
+    "scripts": [
+      "server.js"
+    ],
+    "assets": [
+      ".next/**/*",
+      "public/**/*",
+      "package.json"
+    ],
+    "targets": [
+      "node18-win-x64"
+    ],
+    "outputPath": "../dist/frontend.exe"
+  }
+}

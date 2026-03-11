@@ -1,9 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // Для Electron используем standalone режим
-  output: 'standalone',
+  output: 'export',
   images: {
+    unoptimized: true,
     remotePatterns: [
       {
         protocol: 'http',
@@ -12,8 +12,8 @@ const nextConfig: NextConfig = {
         pathname: '/api/media/**',
       },
     ],
-    unoptimized: true,
   },
+  trailingSlash: true,
 };
 
 export default nextConfig;

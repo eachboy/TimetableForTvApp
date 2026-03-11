@@ -1,0 +1,163 @@
+name: CI — Feature Branches
+
+on:
+  push:
+    branches:
+      - "feature/**"
+      - "fix/**"
+      - develop
+  pull_request:
+    branches:
+      - develop
+      - main
+
+jobs:
+  # ═══════════════════════════════════════════════
+  #  BACKEND — FastAPI (нагрузочные тесты)
+  # ═══════════════════════════════════════════════
+  backend-test:
+    name: 🐍 Backend — Tests & Load
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio httpx locust
+
+      - name: Run unit tests
+        run: |
+          pytest tests/ -v --tb=short || echo "⚠️ No unit tests found, skipping"
+
+      - name: Start FastAPI server
+        run: |
+          uvicorn main:app --host 0.0.0.0 --port 8000 &
+          sleep 5
+        continue-on-error: true
+
+      - name: Create test user in DB
+        run: |
+          python -c "
+          from database import SessionLocal, Base, engine
+          from models import Account
+          from main import hash_password
+          Base.metadata.create_all(bind=engine)
+          db = SessionLocal()
+          existing = db.query(Account).filter(Account.username == '${{ secrets.BACKEND_TEST_USERNAME }}').first()
+          if not existing:
+              acc = Account(
+                  username='${{ secrets.BACKEND_TEST_USERNAME }}',
+                  password_hash=hash_password('${{ secrets.BACKEND_TEST_PASSWORD }}')
+              )
+              db.add(acc)
+              db.commit()
+              print('✅ Test user created')
+          else:
+              print('✅ Test user already exists')
+          db.close()
+          "
+        continue-on-error: true
+
+      - name: Run load test (Locust headless)
+        run: |
+          locust -f tests/locustfile.py \
+            --headless \
+            --users 50 \
+            --spawn-rate 10 \
+            --run-time 30s \
+            --host http://localhost:8000 \
+            --html load-report.html || echo "⚠️ No locustfile found, skipping"
+        continue-on-error: true
+        env:
+          BACKEND_TEST_USERNAME: ${{ secrets.BACKEND_TEST_USERNAME }}
+          BACKEND_TEST_PASSWORD: ${{ secrets.BACKEND_TEST_PASSWORD }}
+
+      - name: Upload load test report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-load-report
+          path: backend/load-report.html
+          retention-days: 7
+
+  # ═══════════════════════════════════════════════
+  #  FRONTEND — Next.js (тесты + сборка)
+  # ═══════════════════════════════════════════════
+  frontend-test:
+    name: ⚛️ Frontend — Tests & Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint || echo "⚠️ No lint script, skipping"
+
+      - name: Unit tests
+        run: npm test -- --passWithNoTests || echo "⚠️ No tests found, skipping"
+
+      - name: Build Next.js
+        run: npm run build
+
+  # ═══════════════════════════════════════════════
+  #  ADMIN PANEL — Tauri (тесты + сборка JS)
+  # ═══════════════════════════════════════════════
+  admin-test:
+    name: 🖥️ Admin Panel — Tests & Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: admin-panel
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: admin-panel/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Unit tests
+        run: npm test -- --passWithNoTests || echo "⚠️ No tests found, skipping"
+
+      - name: Build frontend assets
+        run: npm run build

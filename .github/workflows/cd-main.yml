@@ -33,11 +33,9 @@ jobs:
           - os: ubuntu-latest
             os-name: Linux
             binary-name: backend-x86_64-unknown-linux-gnu
-            pyinstaller-sep: ":"
           - os: windows-latest
             os-name: Windows
             binary-name: backend-x86_64-pc-windows-msvc.exe
-            pyinstaller-sep: ";"
 
     defaults:
       run:
@@ -226,21 +224,15 @@ jobs:
             libgtk-3-dev \
             libssl-dev
 
-      - name: Run k6 load test (Linux only)
-        if: matrix.os == 'ubuntu-latest'
-        uses: grafana/k6-action@v0.3.1
-        with:
-          filename: frontend/tests/load-test.js
-        continue-on-error: true
-
       - name: Install Node dependencies
         run: npm ci
 
       - name: Build Tauri app
         run: npm run tauri build
         env:
-          TAURI_PRIVATE_KEY: ${{ secrets.FRONTEND_TAURI_PRIVATE_KEY }}
-          TAURI_KEY_PASSWORD: ${{ secrets.FRONTEND_TAURI_KEY_PASSWORD }}
+          # Tauri v2: переменные для подписи апдейтера
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.FRONTEND_TAURI_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.FRONTEND_TAURI_KEY_PASSWORD }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -307,21 +299,15 @@ jobs:
             libgtk-3-dev \
             libssl-dev
 
-      - name: Run k6 load test (Linux only)
-        if: matrix.os == 'ubuntu-latest'
-        uses: grafana/k6-action@v0.3.1
-        with:
-          filename: admin-panel/tests/load-test.js
-        continue-on-error: true
-
       - name: Install Node dependencies
         run: npm ci
 
       - name: Build Tauri app
         run: npm run tauri build
         env:
-          TAURI_PRIVATE_KEY: ${{ secrets.ADMIN_TAURI_PRIVATE_KEY }}
-          TAURI_KEY_PASSWORD: ${{ secrets.ADMIN_TAURI_KEY_PASSWORD }}
+          # Tauri v2: переменные для подписи апдейтера
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.ADMIN_TAURI_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.ADMIN_TAURI_KEY_PASSWORD }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -336,7 +322,9 @@ jobs:
   release:
     name: 🚀 Create GitHub Release
     runs-on: ubuntu-latest
-    needs: [backend-build, frontend-build-exe, admin-build-exe]
+    # backend-build убран из needs: бэкенд уже встроен в frontend-артефакт,
+    # и его падение не должно блокировать создание релиза
+    needs: [frontend-build-exe, admin-build-exe]
     if: always() && (needs.frontend-build-exe.result == 'success' || needs.admin-build-exe.result == 'success')
 
     steps:

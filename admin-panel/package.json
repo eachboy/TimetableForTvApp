@@ -8,7 +8,8 @@
     "dev": "next dev",
     "build": "cross-env NEXT_TELEMETRY_DISABLED=1 SKIP_ENV_VALIDATION=true next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "tauri": "tauri"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

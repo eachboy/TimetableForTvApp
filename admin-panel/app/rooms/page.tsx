@@ -34,7 +34,7 @@ import {
 } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Card, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
-import { getRooms, createRoom, deleteRoom, getSchedule, getCurrentWeekType, type Room } from "@/lib/api"
+import { getRooms, createRoom, deleteRoom, getSchedule, getCurrentWeekType, type Room, type ScheduleItem } from "@/lib/api"
 import { getClassTime } from "@/lib/api"
 
 export default function RoomsPage() {
@@ -67,7 +67,7 @@ export default function RoomsPage() {
           
           // Находим следующую пару (учитываем тип недели: чётная/нечётная)
           const upcomingItems = scheduleItems
-            .filter(item => {
+            .filter((item: ScheduleItem) => {
               const startDate = new Date(item.start_date)
               startDate.setHours(0, 0, 0, 0)
               const endDate = new Date(item.end_date)
@@ -77,7 +77,7 @@ export default function RoomsPage() {
               const weekTypeMatch = item.week_type === 'both' || item.week_type === weekType
               return inDateRange && isTodayOrLater && weekTypeMatch
             })
-            .sort((a, b) => {
+            .sort((a: ScheduleItem, b: ScheduleItem) => {
               if (a.day_of_week !== b.day_of_week) return a.day_of_week - b.day_of_week
               return a.class_number - b.class_number
             })
@@ -92,7 +92,7 @@ export default function RoomsPage() {
             }
           }
         } catch (err) {
-          // Игнорируем ошибки загрузки расписания
+          console.error(`Ошибка загрузки расписания для кабинета ${room.number}:`, err)
         }
       }
       setRoomSchedules(schedules)

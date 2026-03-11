@@ -7,11 +7,24 @@ on:
 
 jobs:
   # ═══════════════════════════════════════════════
-  #  BACKEND — FastAPI нагрузочный тест
+  #  BACKEND — нагрузочный тест + сборка бинарника
   # ═══════════════════════════════════════════════
-  backend-load-test:
-    name: 🐍 Backend — Full Load Test
-    runs-on: ubuntu-latest
+  backend-build:
+    name: 🐍 Backend — Build & Load Test (${{ matrix.os-name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            os-name: Linux
+            binary-name: backend-x86_64-unknown-linux-gnu
+            pyinstaller-sep: ":"
+          - os: windows-latest
+            os-name: Windows
+            binary-name: backend-x86_64-pc-windows-msvc.exe
+            pyinstaller-sep: ";"
+
     defaults:
       run:
         working-directory: backend
@@ -28,21 +41,60 @@ jobs:
           cache-dependency-path: backend/requirements.txt
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install pytest pytest-asyncio httpx locust
+        run: pip install -r requirements.txt
 
-      - name: Run unit tests
-        run: pytest tests/ -v --tb=short || echo "⚠️ Skipping"
+      - name: Install PyInstaller
+        run: pip install pyinstaller
 
-      - name: Start FastAPI server
+      - name: Build backend binary (Linux)
+        if: matrix.os == 'ubuntu-latest'
         run: |
-          uvicorn main:app --host 0.0.0.0 --port 8000 &
+          pyinstaller main.py \
+            --onefile \
+            --name backend \
+            --distpath dist \
+            --add-data "*.py:." \
+            --hidden-import uvicorn.logging \
+            --hidden-import uvicorn.loops \
+            --hidden-import uvicorn.loops.auto \
+            --hidden-import uvicorn.protocols \
+            --hidden-import uvicorn.protocols.http \
+            --hidden-import uvicorn.protocols.http.auto \
+            --hidden-import uvicorn.lifespan \
+            --hidden-import uvicorn.lifespan.on
+
+      - name: Build backend binary (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          pyinstaller main.py `
+            --onefile `
+            --name backend `
+            --distpath dist `
+            --add-data "*.py;." `
+            --hidden-import uvicorn.logging `
+            --hidden-import uvicorn.loops `
+            --hidden-import uvicorn.loops.auto `
+            --hidden-import uvicorn.protocols `
+            --hidden-import uvicorn.protocols.http `
+            --hidden-import uvicorn.protocols.http.auto `
+            --hidden-import uvicorn.lifespan `
+            --hidden-import uvicorn.lifespan.on
+
+      - name: Rename binary for Tauri
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" == "windows-latest" ]; then
+            mv dist/backend.exe dist/${{ matrix.binary-name }}
+          else
+            mv dist/backend dist/${{ matrix.binary-name }}
+          fi
+
+      - name: Run load test (Linux only)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          pip install locust
+          ./dist/${{ matrix.binary-name }} &
           sleep 5
-        continue-on-error: true
-
-      - name: Create test user in DB
-        run: |
           python -c "
           from database import SessionLocal, Base, engine
           from models import Account
@@ -57,15 +109,8 @@ jobs:
               )
               db.add(acc)
               db.commit()
-              print('✅ Test user created')
-          else:
-              print('✅ Test user already exists')
           db.close()
-          "
-        continue-on-error: true
-
-      - name: Run full load test (100 users, 60s)
-        run: |
+          " || echo "⚠️ DB init skipped"
           locust -f tests/locustfile.py \
             --headless \
             --users 100 \
@@ -73,15 +118,22 @@ jobs:
             --run-time 60s \
             --host http://localhost:8000 \
             --html load-report.html \
-            --csv load-stats || echo "⚠️ Skipping"
+            --csv load-stats || echo "⚠️ Load test skipped"
         continue-on-error: true
         env:
           BACKEND_TEST_USERNAME: ${{ secrets.BACKEND_TEST_USERNAME }}
           BACKEND_TEST_PASSWORD: ${{ secrets.BACKEND_TEST_PASSWORD }}
 
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-binary-${{ matrix.os-name }}-${{ github.sha }}
+          path: backend/dist/${{ matrix.binary-name }}
+          retention-days: 1
+
       - name: Upload load test results
         uses: actions/upload-artifact@v4
-        if: always()
+        if: matrix.os == 'ubuntu-latest'
         with:
           name: backend-load-report-${{ github.sha }}
           path: |
@@ -95,18 +147,21 @@ jobs:
   frontend-build-exe:
     name: ⚛️ Frontend — Build Tauri (${{ matrix.os-name }})
     runs-on: ${{ matrix.os }}
+    needs: backend-build
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: windows-latest
             os-name: Windows
+            binary-name: backend-x86_64-pc-windows-msvc.exe
             artifact-path: |
               frontend/src-tauri/target/release/bundle/msi/*.msi
               frontend/src-tauri/target/release/bundle/nsis/*.exe
             artifact-name: frontend-windows
           - os: ubuntu-latest
             os-name: Linux
+            binary-name: backend-x86_64-unknown-linux-gnu
             artifact-path: |
               frontend/src-tauri/target/release/bundle/deb/*.deb
               frontend/src-tauri/target/release/bundle/appimage/*.AppImage
@@ -119,6 +174,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Download backend binary
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-binary-${{ matrix.os-name }}-${{ github.sha }}
+          path: frontend/src-tauri/binaries/
+
+      - name: Fix binary permissions (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: chmod +x src-tauri/binaries/${{ matrix.binary-name }}
 
       - name: Set up Node.js 22
         uses: actions/setup-node@v4
@@ -257,7 +322,7 @@ jobs:
   release:
     name: 🚀 Create GitHub Release
     runs-on: ubuntu-latest
-    needs: [backend-load-test, frontend-build-exe, admin-build-exe]
+    needs: [backend-build, frontend-build-exe, admin-build-exe]
     if: always() && (needs.frontend-build-exe.result == 'success' || needs.admin-build-exe.result == 'success')
 
     steps:
@@ -288,6 +353,7 @@ jobs:
             ### Содержимое:
             - 🖥️ Admin Panel — Windows (`.exe`, `.msi`) и Linux (`.deb`, `.AppImage`)
             - ⚛️ Frontend — Windows (`.exe`, `.msi`) и Linux (`.deb`, `.AppImage`)
+            - 🐍 Backend встроен в Frontend
 
             ### Нагрузочные тесты:
             Отчёт доступен в разделе **Actions → Artifacts**

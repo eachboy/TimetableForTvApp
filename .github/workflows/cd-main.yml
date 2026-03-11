@@ -52,6 +52,9 @@ jobs:
             --html load-report.html \
             --csv load-stats || echo "⚠️ Skipping"
         continue-on-error: true
+        env:
+          BACKEND_TEST_USERNAME: ${{ secrets.BACKEND_TEST_USERNAME }}
+          BACKEND_TEST_PASSWORD: ${{ secrets.BACKEND_TEST_PASSWORD }}
 
       - name: Upload load test results
         uses: actions/upload-artifact@v4
@@ -104,8 +107,8 @@ jobs:
       - name: Build Tauri app (.exe)
         run: npm run tauri build
         env:
-          TAURI_PRIVATE_KEY: ${{ secrets.FRONTEND_TAURI_PRIVATE_KEY }}
-          TAURI_KEY_PASSWORD: ${{ secrets.FRONTEND_TAURI_KEY_PASSWORD }}
+          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
 
       - name: Upload .exe artifact
         uses: actions/upload-artifact@v4
@@ -157,8 +160,8 @@ jobs:
       - name: Build Tauri app (.exe)
         run: npm run tauri build
         env:
-          TAURI_PRIVATE_KEY: ${{ secrets.ADMIN_TAURI_PRIVATE_KEY }}
-          TAURI_KEY_PASSWORD: ${{ secrets.ADMIN_TAURI_KEY_PASSWORD }}
+          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
 
       - name: Upload .exe artifact
         uses: actions/upload-artifact@v4

@@ -42,11 +42,33 @@ jobs:
         run: |
           pytest tests/ -v --tb=short || echo "⚠️ No unit tests found, skipping"
 
-      - name: Start FastAPI server for load test
+      - name: Start FastAPI server
         run: |
           uvicorn main:app --host 0.0.0.0 --port 8000 &
-          sleep 3
-          echo "SERVER_PID=$!" >> $GITHUB_ENV
+          sleep 5
+        continue-on-error: true
+
+      - name: Create test user in DB
+        run: |
+          python -c "
+          from database import SessionLocal, Base, engine
+          from models import Account
+          from main import hash_password
+          Base.metadata.create_all(bind=engine)
+          db = SessionLocal()
+          existing = db.query(Account).filter(Account.username == '${{ secrets.BACKEND_TEST_USERNAME }}').first()
+          if not existing:
+              acc = Account(
+                  username='${{ secrets.BACKEND_TEST_USERNAME }}',
+                  password_hash=hash_password('${{ secrets.BACKEND_TEST_PASSWORD }}')
+              )
+              db.add(acc)
+              db.commit()
+              print('✅ Test user created')
+          else:
+              print('✅ Test user already exists')
+          db.close()
+          "
         continue-on-error: true
 
       - name: Run load test (Locust headless)

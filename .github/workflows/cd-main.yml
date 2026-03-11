@@ -41,6 +41,29 @@ jobs:
           sleep 5
         continue-on-error: true
 
+      - name: Create test user in DB
+        run: |
+          python -c "
+          from database import SessionLocal, Base, engine
+          from models import Account
+          from main import hash_password
+          Base.metadata.create_all(bind=engine)
+          db = SessionLocal()
+          existing = db.query(Account).filter(Account.username == '${{ secrets.BACKEND_TEST_USERNAME }}').first()
+          if not existing:
+              acc = Account(
+                  username='${{ secrets.BACKEND_TEST_USERNAME }}',
+                  password_hash=hash_password('${{ secrets.BACKEND_TEST_PASSWORD }}')
+              )
+              db.add(acc)
+              db.commit()
+              print('✅ Test user created')
+          else:
+              print('✅ Test user already exists')
+          db.close()
+          "
+        continue-on-error: true
+
       - name: Run full load test (100 users, 60s)
         run: |
           locust -f tests/locustfile.py \
@@ -107,8 +130,8 @@ jobs:
       - name: Build Tauri app (.exe)
         run: npm run tauri build
         env:
-          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
-          TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+          TAURI_PRIVATE_KEY: ${{ secrets.FRONTEND_TAURI_PRIVATE_KEY }}
+          TAURI_KEY_PASSWORD: ${{ secrets.FRONTEND_TAURI_KEY_PASSWORD }}
 
       - name: Upload .exe artifact
         uses: actions/upload-artifact@v4
@@ -160,8 +183,8 @@ jobs:
       - name: Build Tauri app (.exe)
         run: npm run tauri build
         env:
-          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
-          TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+          TAURI_PRIVATE_KEY: ${{ secrets.ADMIN_TAURI_PRIVATE_KEY }}
+          TAURI_KEY_PASSWORD: ${{ secrets.ADMIN_TAURI_KEY_PASSWORD }}
 
       - name: Upload .exe artifact
         uses: actions/upload-artifact@v4

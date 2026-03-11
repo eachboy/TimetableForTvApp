@@ -4,6 +4,20 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Версия релиза (например: 1.0.0)"
+        required: true
+        default: "1.0.0"
+      prerelease:
+        description: "Пре-релиз?"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
 
 permissions:
   contents: write
@@ -337,17 +351,28 @@ jobs:
         with:
           path: release-assets
 
-      - name: Get short SHA
-        id: sha
-        run: echo "short=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+      - name: Determine version and tag
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "tag=v${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            echo "name=v${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            echo "prerelease=${{ github.event.inputs.prerelease }}" >> $GITHUB_OUTPUT
+          else
+            SHORT=$(echo ${{ github.sha }} | cut -c1-7)
+            echo "tag=release-${SHORT}" >> $GITHUB_OUTPUT
+            echo "name=Release ${SHORT}" >> $GITHUB_OUTPUT
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: release-${{ steps.sha.outputs.short }}
-          name: "Release ${{ steps.sha.outputs.short }}"
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.name }}
+          prerelease: ${{ steps.version.outputs.prerelease }}
           body: |
-            ## 🚀 Автоматический релиз
+            ## 🚀 Релиз ${{ steps.version.outputs.name }}
 
             **Коммит:** ${{ github.sha }}
             **Дата:** ${{ github.event.head_commit.timestamp }}
@@ -366,6 +391,5 @@ jobs:
             release-assets/**/*.deb
             release-assets/**/*.AppImage
           draft: false
-          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

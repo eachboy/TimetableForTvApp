@@ -725,7 +725,7 @@ def health_check():
 def get_system_metrics():
     """Получить системные метрики (CPU и RAM)"""
     # Получаем метрики CPU
-    cpu_percent = psutil.cpu_percent(interval=0.1)
+    cpu_percent = psutil.cpu_percent()
     cpu_count = psutil.cpu_count()
     
     # Получаем метрики памяти

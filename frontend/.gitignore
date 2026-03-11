@@ -39,9 +39,3 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
-
-# electron
-electron/main.js
-electron/preload.js
-/dist
-/dist-build

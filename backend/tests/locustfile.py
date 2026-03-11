@@ -17,14 +17,17 @@ class TimetableUser(HttpUser):
 
     def on_start(self):
         """Авторизуемся и получаем JWT-токен перед тестами"""
+        self.token = None
+        if not AUTH_USERNAME or not AUTH_PASSWORD:
+            print("⚠️ Credentials empty, skipping login")
+            return
         response = self.client.post(
             "/api/auth/login",
             json={"username": AUTH_USERNAME, "password": AUTH_PASSWORD}
         )
+        print(f"DEBUG: login status={response.status_code}")
         if response.status_code == 200:
             self.token = response.json().get("access_token")
-        else:
-            self.token = None
 
     def _headers(self):
         """Возвращает заголовки с JWT если есть токен"""

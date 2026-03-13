@@ -12,6 +12,7 @@ import {
   IconSearch,
   IconSettings,
   IconUsers,
+  IconRefresh,
 } from "@tabler/icons-react"
 
 import { NavDocuments } from "@/components/sidebar/nav-documents"
@@ -80,6 +81,11 @@ const data = {
       url: "/news",
       icon: IconReport,
     },
+    {
+      name: "Обновления",
+      url: "/updates",
+      icon: IconRefresh,
+    },
   ],
 }
 
@@ -91,10 +97,10 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           <SidebarMenuItem>
             <SidebarMenuButton
               asChild
-              className="data-[slot=sidebar-menu-button]:!p-1.5"
+              className="data-[slot=sidebar-menu-button]:p-1.5!"
             >
               <Link href="/dashboard">
-                <University className="!size-5" />
+                <University className="size-5!" />
                 <span className="text-base font-semibold">{process.env.NEXT_PUBLIC_APP_NAME}</span>
               </Link>
             </SidebarMenuButton>

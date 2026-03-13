@@ -9,7 +9,7 @@ import {
   SidebarProvider,
 } from "@/components/ui/sidebar"
 import { ScheduleForm, type ScheduleFormData } from "@/components/schedulefill/schedule-form"
-import { createScheduleItem, getRooms, getTeachers } from "@/lib/api"
+import { createScheduleItem, getRooms, getTeachers, type Room, type Teacher } from "@/lib/api"
 
 export default function ScheduleFillPage() {
   const [rooms, setRooms] = React.useState<Array<{ value: string; label: string }>>([])
@@ -27,8 +27,8 @@ export default function ScheduleFillPage() {
         getRooms(),
         getTeachers(),
       ])
-      setRooms(roomsData.map(room => ({ value: room.id.toString(), label: room.number })))
-      setTeachers(teachersData.map(teacher => ({ value: teacher.id.toString(), label: teacher.name })))
+      setRooms(roomsData.map((room: Room) => ({ value: room.id.toString(), label: room.number })))
+      setTeachers(teachersData.map((teacher: Teacher) => ({ value: teacher.id.toString(), label: teacher.name })))
     } catch (error) {
       toast.error("Ошибка загрузки данных")
       console.error(error)

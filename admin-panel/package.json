@@ -1,8 +1,7 @@
 {
   "name": "admin-panel",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
-  "main": "electron/main.js",
   "homepage": "./",
   "scripts": {
     "dev": "next dev",
@@ -30,6 +29,7 @@
     "@radix-ui/react-tooltip": "^1.2.8",
     "@tabler/icons-react": "^3.35.0",
     "@tanstack/react-table": "^8.21.3",
+    "@tauri-apps/api": "^2.10.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^0.559.0",

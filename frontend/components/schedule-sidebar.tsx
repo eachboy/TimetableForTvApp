@@ -14,15 +14,15 @@ interface ScheduleSidebarProps {
 export function ScheduleSidebar({ roomsWithSchedule }: ScheduleSidebarProps) {
   if (roomsWithSchedule.length === 0) {
     return (
-      <div className="text-zinc-400 text-sm">
-        Нет кабинетов
+      <div className="h-full flex items-center justify-center">
+        <div className="text-zinc-400 text-sm">Нет кабинетов</div>
       </div>
     );
   }
 
   return (
-    <div className="space-y-2">
-      <h2 className="text-base font-semibold mb-3 px-1 text-white">Пары на сегодня</h2>
+    <div className="h-full flex flex-col justify-center">
+      <h1 className="text-base font-semibold mb-3 px-1 text-white">Ближайшие занятия</h1>
       <div className="space-y-2">
         {roomsWithSchedule.map(({ room, todayClasses }) => (
           <div key={room.id} className="space-y-2">
@@ -65,9 +65,7 @@ export function ScheduleSidebar({ roomsWithSchedule }: ScheduleSidebarProps) {
                   </div>
                 </div>
                 <div className="flex-1 min-w-0 pt-1 flex items-center">
-                  <p className="text-sm text-zinc-500">
-                    Нет занятий
-                  </p>
+                  <p className="text-sm text-zinc-500">Нет занятий</p>
                 </div>
               </div>
             )}
@@ -77,4 +75,3 @@ export function ScheduleSidebar({ roomsWithSchedule }: ScheduleSidebarProps) {
     </div>
   );
 }
-

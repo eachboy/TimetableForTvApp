@@ -4,7 +4,12 @@ from sqlalchemy.orm import sessionmaker
 import os
 from pathlib import Path
 
-SQLALCHEMY_DATABASE_URL = "sqlite:///./timetable.db"
+_db_path = os.environ.get("DB_PATH")
+if _db_path:
+    Path(_db_path).parent.mkdir(parents=True, exist_ok=True)
+    SQLALCHEMY_DATABASE_URL = f"sqlite:///{_db_path}"
+else:
+    SQLALCHEMY_DATABASE_URL = "sqlite:///./timetable.db"
 
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL, 

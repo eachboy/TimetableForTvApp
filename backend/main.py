@@ -80,7 +80,10 @@ def verify_password(password: str, password_hash: str) -> bool:
     hash_bytes = password_hash.encode('utf-8')
     return bcrypt.checkpw(password_bytes, hash_bytes)
 
-# Создаем таблицы
+# Применяем миграции схемы (безопасно для существующих данных),
+# затем создаём все таблицы которых ещё нет (idempotent).
+from migrate import run_migrations
+run_migrations()
 Base.metadata.create_all(bind=engine)
 
 # JWT настройки

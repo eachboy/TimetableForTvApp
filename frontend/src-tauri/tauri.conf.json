@@ -1,11 +1,11 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Timetable",
-  "version": "0.1.0",
+  "version": "1.1.0",
   "identifier": "com.eachboy.Timetable",
   "build": {
     "frontendDist": "../out",
-    "devUrl": "http://localhost:3000",
+    "devUrl": "http://localhost:3001",
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build"
   },
@@ -31,6 +31,25 @@
       "icons/icon.png",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/backend"]
+    "externalBin": ["binaries/backend"],
+    "windows": {
+      "wix": {},
+      "nsis": {}
+    },
+    "linux": {
+      "appimage": {}
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "REPLACE_WITH_YOUR_TAURI_SIGNING_PUBLIC_KEY",
+      "endpoints": [
+        "http://timetable-admin.local:9000/latest.json"
+      ],
+      "dialog": false,
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

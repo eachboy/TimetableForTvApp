@@ -80,7 +80,10 @@ def verify_password(password: str, password_hash: str) -> bool:
     hash_bytes = password_hash.encode('utf-8')
     return bcrypt.checkpw(password_bytes, hash_bytes)
 
-# Создаем таблицы
+# Применяем миграции схемы (безопасно для существующих данных),
+# затем создаём все таблицы которых ещё нет (idempotent).
+from migrate import run_migrations
+run_migrations()
 Base.metadata.create_all(bind=engine)
 
 # JWT настройки
@@ -297,9 +300,6 @@ cors_origins = [
     "http://localhost:3001",  # Admin-panel
     "http://127.0.0.1:3000",
     "http://127.0.0.1:3001",
-    "tauri://localhost",          # ← добавить
-    "http://tauri.localhost",     # ← добавить
-    "https://tauri.localhost", 
 ]
 
 # Можно добавить дополнительные origins через переменную окружения
@@ -446,6 +446,27 @@ async def upload_media(
     
     return db_media
 
+
+@app.options("/api/media/{media_id}/file")
+async def options_media_file(media_id: int, request: Request):
+    """Обработка preflight запросов для CORS"""
+    origin = request.headers.get("origin")
+    headers = {
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "*",
+    }
+    
+    if origin and origin in cors_origins:
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Access-Control-Allow-Credentials"] = "true"
+    elif cors_origins:
+        # Если origin не указан, используем первый из списка разрешенных
+        headers["Access-Control-Allow-Origin"] = cors_origins[0]
+    else:
+        headers["Access-Control-Allow-Origin"] = "*"
+    
+    return Response(status_code=200, headers=headers)
+
 @app.get("/api/media/{media_id}/file")
 async def get_media_file(media_id: int, request: Request, db: Session = Depends(get_db)):
     """Получить медиа файл"""
@@ -474,7 +495,33 @@ async def get_media_file(media_id: int, request: Request, db: Session = Depends(
     }
     media_type = media_types.get(file_ext, 'application/octet-stream')
     
-    return FileResponse(media.file_path, media_type=media_type)
+    # Получаем origin из запроса для правильной настройки CORS
+    origin = request.headers.get("origin")
+    
+    # Создаем FileResponse
+    response = FileResponse(
+        media.file_path,
+        media_type=media_type
+    )
+    
+    # Устанавливаем CORS заголовки после создания response
+    # Важно: при allow_credentials=True нельзя использовать "*" для origin
+    if origin and origin in cors_origins:
+        # Если origin в списке разрешенных, используем его
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+    elif cors_origins:
+        # Если origin не указан или не в списке, используем первый из списка разрешенных
+        response.headers["Access-Control-Allow-Origin"] = cors_origins[0]
+    else:
+        # Fallback на "*" только если нет разрешенных origins
+        response.headers["Access-Control-Allow-Origin"] = "*"
+    
+    response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Expose-Headers"] = "*"
+    
+    return response
 
 
 @app.delete("/api/media/{media_id}", status_code=204)

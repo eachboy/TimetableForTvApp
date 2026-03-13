@@ -72,6 +72,7 @@ a = Analysis(
         'models',
         'schemas',
         'init_db',
+        'migrate',
         'main',
     ],
     hookspath=[],

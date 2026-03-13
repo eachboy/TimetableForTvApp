@@ -58,41 +58,11 @@ jobs:
       - name: Install PyInstaller
         run: pip install pyinstaller
 
-      - name: Build backend binary (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          pyinstaller main.py \
-            --onefile \
-            --name backend \
-            --distpath dist \
-            --add-data "*.py:." \
-            --hidden-import uvicorn.logging \
-            --hidden-import uvicorn.loops \
-            --hidden-import uvicorn.loops.auto \
-            --hidden-import uvicorn.protocols \
-            --hidden-import uvicorn.protocols.http \
-            --hidden-import uvicorn.protocols.http.auto \
-            --hidden-import uvicorn.lifespan \
-            --hidden-import uvicorn.lifespan.on
+      # Используем backend.spec — он содержит все hiddenimports (migrate, bcrypt, jose и др.)
+      - name: Build backend binary
+        run: pyinstaller backend.spec --clean --distpath dist
 
-      - name: Build backend binary (Windows)
-        if: matrix.os == 'windows-latest'
-        run: |
-          pyinstaller main.py `
-            --onefile `
-            --name backend `
-            --distpath dist `
-            --add-data "*.py;." `
-            --hidden-import uvicorn.logging `
-            --hidden-import uvicorn.loops `
-            --hidden-import uvicorn.loops.auto `
-            --hidden-import uvicorn.protocols `
-            --hidden-import uvicorn.protocols.http `
-            --hidden-import uvicorn.protocols.http.auto `
-            --hidden-import uvicorn.lifespan `
-            --hidden-import uvicorn.lifespan.on
-
-      - name: Rename binary for Tauri
+      - name: Rename binary for Tauri sidecar
         shell: bash
         run: |
           if [ "${{ matrix.os }}" == "windows-latest" ]; then
@@ -105,9 +75,12 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           pip install locust
-          ./dist/${{ matrix.binary-name }} &
+          # Указываем явный путь к БД чтобы не писать во временную папку
+          DB_PATH=/tmp/test_timetable.db ./dist/${{ matrix.binary-name }} &
           sleep 5
           python -c "
+          import os
+          os.environ['DB_PATH'] = '/tmp/test_timetable.db'
           from database import SessionLocal, Base, engine
           from models import Account
           from main import hash_password
@@ -230,7 +203,6 @@ jobs:
       - name: Build Tauri app
         run: npm run tauri build
         env:
-          # Tauri v2: переменные для подписи апдейтера
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.FRONTEND_TAURI_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.FRONTEND_TAURI_KEY_PASSWORD }}
 
@@ -305,7 +277,6 @@ jobs:
       - name: Build Tauri app
         run: npm run tauri build
         env:
-          # Tauri v2: переменные для подписи апдейтера
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.ADMIN_TAURI_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.ADMIN_TAURI_KEY_PASSWORD }}
 
@@ -317,13 +288,11 @@ jobs:
           retention-days: 30
 
   # ═══════════════════════════════════════════════
-  #  RELEASE — создаём GitHub Release со всеми файлами
+  #  RELEASE — создаём GitHub Release
   # ═══════════════════════════════════════════════
   release:
     name: 🚀 Create GitHub Release
     runs-on: ubuntu-latest
-    # backend-build убран из needs: бэкенд уже встроен в frontend-артефакт,
-    # и его падение не должно блокировать создание релиза
     needs: [frontend-build-exe, admin-build-exe]
     if: always() && (needs.frontend-build-exe.result == 'success' || needs.admin-build-exe.result == 'success')
 

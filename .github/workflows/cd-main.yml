@@ -71,23 +71,54 @@ jobs:
             mv dist/backend dist/${{ matrix.binary-name }}
           fi
 
-      - name: Copy database alongside binary
+      # Генерируем чистую seed-БД со всеми таблицами и системным аккаунтом.
+      # Если timetable.db уже есть в репозитории — используем его как есть.
+      # Seed-БД копируется в dist/ и потом Tauri бандлит её как resource.
+      # database.py при первом запуске на новой машине скопирует её в AppData.
+      - name: Generate seed database
         shell: bash
         run: |
           if [ -f "timetable.db" ]; then
+            echo "✅ timetable.db found in repo, using it as seed"
             cp timetable.db dist/timetable.db
-            echo "✅ timetable.db copied to dist/"
           else
-            echo "⚠️ timetable.db not found in backend/, skipping"
+            echo "⚠️ timetable.db not in repo — generating fresh seed DB"
+            python -c "
+          from database import SessionLocal, Base, engine
+          from models import Account
+          from main import hash_password
+          import os, shutil
+          Base.metadata.create_all(bind=engine)
+          db = SessionLocal()
+          existing = db.query(Account).filter(Account.username == 'admin').first()
+          if not existing:
+              acc = Account(username='admin', password_hash=hash_password('admin'))
+              db.add(acc)
+              db.commit()
+              print('✅ Default admin account created (change password after first login!)')
+          db.close()
+          "
+            cp timetable.db dist/timetable.db
+            echo "✅ Fresh seed DB created and copied to dist/"
           fi
 
       - name: Run load test (Linux only)
         if: matrix.os == 'ubuntu-latest'
         run: |
           pip install locust
-          # Указываем явный путь к БД чтобы не писать во временную папку
-          DB_PATH=/tmp/test_timetable.db ./dist/${{ matrix.binary-name }} &
-          sleep 5
+          # Запускаем бинарник с явными путями к БД и медиа
+          # (PyInstaller-бинарник стартует медленнее обычного Python, даём 15 сек)
+          DB_PATH=/tmp/test_timetable.db \
+          MEDIA_DIR=/tmp/test_media \
+          ./dist/${{ matrix.binary-name }} &
+          echo "Waiting for backend to start..."
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8000/api/health > /dev/null 2>&1; then
+              echo "✅ Backend is up after ${i}s"
+              break
+            fi
+            sleep 1
+          done
           python -c "
           import os
           os.environ['DB_PATH'] = '/tmp/test_timetable.db'

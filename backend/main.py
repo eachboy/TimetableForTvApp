@@ -317,8 +317,11 @@ app.add_middleware(
 )
 
 # Создаем директорию для медиа файлов
-MEDIA_DIR = Path("media")
-MEDIA_DIR.mkdir(exist_ok=True)
+# Если задана переменная окружения MEDIA_DIR (передаётся из Tauri), используем её —
+# это обеспечивает сохранность медиафайлов между запусками в AppData пользователя.
+_media_dir_env = os.getenv("MEDIA_DIR")
+MEDIA_DIR = Path(_media_dir_env) if _media_dir_env else Path("media")
+MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ========== TEACHERS ENDPOINTS ==========

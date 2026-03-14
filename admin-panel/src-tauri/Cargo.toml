@@ -1,6 +1,6 @@
 [package]
 name = "Timetable_Control_Panel"
-version = "1.1.0"
+version = "1.1.1"
 description = "Timetable"
 authors = ["eachboy"]
 license = ""

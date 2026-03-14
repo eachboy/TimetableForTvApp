@@ -31,7 +31,9 @@
       "icons/icon.png",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/backend"],
+    "externalBin": [
+      "binaries/backend"
+    ],
     "windows": {
       "wix": {},
       "nsis": {}
@@ -49,7 +51,8 @@
       "dialog": false,
       "windows": {
         "installMode": "passive"
-      }
+      },
+      "dangerousInsecureTransportProtocol": true
     }
   }
 }

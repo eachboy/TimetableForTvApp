@@ -13,6 +13,4 @@ admin-panel/node_modules/
 
 # frontend
 
-admin-panel/dist-build/
-admin-panel/dist-build.zip
-admin-panel/node_modules/
+frontend/src-tauri/binaries/

@@ -71,6 +71,16 @@ jobs:
             mv dist/backend dist/${{ matrix.binary-name }}
           fi
 
+      - name: Copy database alongside binary
+        shell: bash
+        run: |
+          if [ -f "timetable.db" ]; then
+            cp timetable.db dist/timetable.db
+            echo "✅ timetable.db copied to dist/"
+          else
+            echo "⚠️ timetable.db not found in backend/, skipping"
+          fi
+
       - name: Run load test (Linux only)
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -113,7 +123,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: backend-binary-${{ matrix.os-name }}-${{ github.sha }}
-          path: backend/dist/${{ matrix.binary-name }}
+          path: |
+            backend/dist/${{ matrix.binary-name }}
+            backend/dist/timetable.db
           retention-days: 1
 
       - name: Upload load test results
@@ -169,6 +181,15 @@ jobs:
       - name: Fix binary permissions (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: chmod +x src-tauri/binaries/${{ matrix.binary-name }}
+
+      - name: Copy bundled database to binaries folder
+        shell: bash
+        run: |
+          if [ -f src-tauri/binaries/timetable.db ]; then
+            echo "✅ timetable.db found in binaries/"
+          else
+            echo "⚠️ timetable.db not found, app will start with empty database"
+          fi
 
       - name: Set up Node.js 22
         uses: actions/setup-node@v4

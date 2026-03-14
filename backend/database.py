@@ -2,37 +2,86 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import os
+import sys
+import shutil
 from pathlib import Path
 
-_db_path = os.environ.get("DB_PATH")
-if _db_path:
-    Path(_db_path).parent.mkdir(parents=True, exist_ok=True)
-    SQLALCHEMY_DATABASE_URL = f"sqlite:///{_db_path}"
-else:
-    SQLALCHEMY_DATABASE_URL = "sqlite:///./timetable.db"
+
+def _resolve_db_path() -> str:
+    """
+    Определяет путь к БД по следующей логике:
+    1. Если задана переменная DB_PATH — используем её (Tauri передаёт AppData путь).
+    2. Если DB_PATH не задана — fallback для локальной разработки (рядом со скриптом).
+
+    Дополнительно: если DB_PATH задан но файл там не существует,
+    ищем timetable.db рядом с исполняемым файлом (bundled БД)
+    и копируем её в AppData как начальные данные.
+    """
+    db_path_env = os.environ.get("DB_PATH")
+
+    if db_path_env:
+        target = Path(db_path_env)
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        # Если БД в AppData ещё не существует — ищем bundled копию
+        if not target.exists():
+            bundled = _find_bundled_db()
+            if bundled and bundled.exists():
+                shutil.copy2(bundled, target)
+                print(f"[DB] Copied bundled database from {bundled} to {target}")
+            else:
+                print(f"[DB] No bundled database found, a fresh one will be created at {target}")
+
+        return f"sqlite:///{target}"
+
+    # Fallback для разработки
+    return "sqlite:///./timetable.db"
+
+
+def _find_bundled_db() -> Path | None:
+    """
+    Ищет timetable.db рядом с исполняемым файлом.
+    В PyInstaller-сборке exe лежит в папке установки,
+    а _MEIPASS — временная папка распакованных ресурсов.
+    """
+    candidates = []
+
+    # Папка рядом с exe (папка установки — здесь ищем в первую очередь)
+    if getattr(sys, 'frozen', False):
+        exe_dir = Path(sys.executable).parent
+        candidates.append(exe_dir / "timetable.db")
+
+    # Папка рядом со скриптом
+    candidates.append(Path(__file__).parent / "timetable.db")
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    return None
+
+
+SQLALCHEMY_DATABASE_URL = _resolve_db_path()
 
 engine = create_engine(
-    SQLALCHEMY_DATABASE_URL, 
+    SQLALCHEMY_DATABASE_URL,
     connect_args={"check_same_thread": False},
-    pool_pre_ping=True  # Проверка соединений перед использованием
+    pool_pre_ping=True
 )
 
-# Настраиваем SQLite для надежного сохранения данных
+
 @event.listens_for(engine, "connect")
 def set_sqlite_pragma(dbapi_conn, connection_record):
-    """Устанавливает настройки SQLite для надежного сохранения"""
     cursor = dbapi_conn.cursor()
-    # FULL синхронизация - гарантирует, что данные записаны на диск
     cursor.execute("PRAGMA synchronous = FULL")
-    # WAL режим для лучшей производительности и надежности
     cursor.execute("PRAGMA journal_mode = WAL")
-    # Увеличиваем таймаут для блокировок
     cursor.execute("PRAGMA busy_timeout = 30000")
     cursor.close()
 
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
 
 def get_db():
     db = SessionLocal()
@@ -40,4 +89,3 @@ def get_db():
         yield db
     finally:
         db.close()
-

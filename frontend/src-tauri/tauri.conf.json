@@ -40,7 +40,10 @@
     },
     "linux": {
       "appimage": {}
-    }
+    },
+    "resources": [
+      "binaries/timetable.db"
+    ]
   },
   "plugins": {
     "updater": {

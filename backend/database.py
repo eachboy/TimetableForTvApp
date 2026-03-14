@@ -29,21 +29,31 @@ def _resolve_db_path() -> str:
 
 def _find_bundled_db() -> Path | None:
     """
-    Ищет БД рядом с исполняемым файлом.
-    Tauri на Windows может скопировать timetable.db без расширения — проверяем оба варианта.
+    Ищет шаблонную БД рядом с исполняемым файлом или в директории приложения.
+    Tauri на Windows копирует resources рядом с .exe.
+    Tauri также может скопировать timetable.db без расширения — проверяем оба варианта.
     """
     candidates = []
 
     if getattr(sys, 'frozen', False):
         exe_dir = Path(sys.executable).parent
-        candidates.append(exe_dir / "timetable.db")   # с расширением
-        candidates.append(exe_dir / "timetable")       # без расширения (баг Tauri на Windows)
+        # Tauri кладёт resources рядом с .exe
+        candidates.append(exe_dir / "timetable.db")
+        candidates.append(exe_dir / "timetable")
+        # Иногда Tauri кладёт resources в подпапку _up_
+        candidates.append(exe_dir.parent / "timetable.db")
+        # _MEIPASS — внутренний каталог PyInstaller
+        if hasattr(sys, '_MEIPASS'):
+            meipass = Path(sys._MEIPASS)
+            candidates.append(meipass / "timetable.db")
+            candidates.append(meipass / "timetable")
 
+    # Для dev-запуска — рядом со скриптом
     candidates.append(Path(__file__).parent / "timetable.db")
     candidates.append(Path(__file__).parent / "timetable")
 
     for candidate in candidates:
-        if candidate.exists() and candidate.stat().st_size > 4096:
+        if candidate.exists() and candidate.stat().st_size > 0:
             print(f"[DB] Found bundled database: {candidate}")
             return candidate
 

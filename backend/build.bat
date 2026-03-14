@@ -63,12 +63,40 @@ if exist "media\" (
     echo Media directory copied to dist\
 )
 
+REM -------------------------------------------------------
+REM Copy backend.exe into Tauri sidecar binaries directory.
+REM Tauri requires sidecar name format: {name}-{target-triple}.exe
+REM -------------------------------------------------------
+echo.
+echo Copying backend.exe to Tauri sidecar binaries...
+
+set TAURI_BINARIES=..\frontend\src-tauri\binaries
+
+if not exist "%TAURI_BINARIES%\" mkdir "%TAURI_BINARIES%"
+
+copy /Y "dist\backend.exe" "%TAURI_BINARIES%\backend-x86_64-pc-windows-msvc.exe" >nul
+if errorlevel 1 (
+    echo WARNING: Failed to copy backend.exe to Tauri binaries!
+) else (
+    echo backend.exe copied to %TAURI_BINARIES%\backend-x86_64-pc-windows-msvc.exe
+)
+
+REM Copy the seed database so Tauri bundles it as a resource.
+REM database.py will copy it to AppData on first launch when no DB exists yet.
+if exist "timetable.db" (
+    copy /Y "timetable.db" "%TAURI_BINARIES%\timetable.db" >nul
+    echo timetable.db (seed) copied to %TAURI_BINARIES%\timetable.db
+)
+
 echo.
 echo ========================================
 echo Build completed successfully!
 echo ========================================
 echo.
-echo Executable file is located at: dist\backend.exe
-echo Database: dist\timetable.db
+echo Executable file  : dist\backend.exe
+echo Tauri sidecar    : %TAURI_BINARIES%\backend-x86_64-pc-windows-msvc.exe
+echo Seed database    : %TAURI_BINARIES%\timetable.db
+echo.
+echo Next step: run "npm run tauri build" inside the frontend\ directory.
 echo.
 pause

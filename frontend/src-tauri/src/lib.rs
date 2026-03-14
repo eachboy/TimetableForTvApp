@@ -7,8 +7,6 @@ use tauri_plugin_updater::UpdaterExt;
 mod mdns_discovery;
 use mdns_discovery::discover_update_server;
 
-const CHECK_INTERVAL_SECS: u64 = 60 * 60;
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -41,12 +39,16 @@ pub fn run() {
                 .spawn()
                 .expect("Failed to start backend sidecar");
 
+            // Запускаем фоновую задачу проверки обновлений в 22:00
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
                 loop {
+                    let secs_until_22 = seconds_until_22_00();
+                    log::info!("Next update check in {}s (at 22:00)", secs_until_22);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(secs_until_22)).await;
                     check_and_apply_update(&handle).await;
-                    tokio::time::sleep(tokio::time::Duration::from_secs(CHECK_INTERVAL_SECS)).await;
+                    // После проверки спим 60 секунд чтобы не проверять дважды в одну минуту
+                    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
                 }
             });
 
@@ -54,6 +56,37 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Возвращает количество секунд до следующего наступления 22:00 по местному времени.
+fn seconds_until_22_00() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // Смещение часового пояса берём из переменной окружения TZ или считаем UTC.
+    // Для простоты используем UTC — скорректируйте offset под свой часовой пояс.
+    // UTC+3 (Москва) = 3 * 3600 = 10800
+    let tz_offset_secs: u64 = std::env::var("TZ_OFFSET_HOURS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(3) // По умолчанию UTC+3
+        .unsigned_abs()
+        * 3600;
+
+    let local_secs = now_secs + tz_offset_secs;
+    let secs_in_day = local_secs % 86400;          // сколько секунд прошло с начала суток
+    let target = 22 * 3600_u64;                     // 22:00 = 79200 секунд от начала суток
+
+    if secs_in_day < target {
+        target - secs_in_day
+    } else {
+        // 22:00 сегодня уже прошло — ждём до 22:00 завтра
+        86400 - secs_in_day + target
+    }
 }
 
 async fn check_and_apply_update(handle: &tauri::AppHandle) {
@@ -86,10 +119,6 @@ async fn check_and_apply_update(handle: &tauri::AppHandle) {
         }
     }
 
-    // Сигнатуры tauri-plugin-updater 2.10:
-    //   updater_builder()          -> UpdaterBuilder         (не Result)
-    //   .endpoints(Vec<url::Url>)  -> Result<UpdaterBuilder> (нужен match)
-    //   .build()                   -> Result<Updater>
     let parsed_url = match latest_url.parse::<url::Url>() {
         Ok(u) => u,
         Err(e) => {

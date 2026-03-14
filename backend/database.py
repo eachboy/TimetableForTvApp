@@ -8,54 +8,43 @@ from pathlib import Path
 
 
 def _resolve_db_path() -> str:
-    """
-    Определяет путь к БД по следующей логике:
-    1. Если задана переменная DB_PATH — используем её (Tauri передаёт AppData путь).
-    2. Если DB_PATH не задана — fallback для локальной разработки (рядом со скриптом).
-
-    Дополнительно: если DB_PATH задан но файл там не существует,
-    ищем timetable.db рядом с исполняемым файлом (bundled БД)
-    и копируем её в AppData как начальные данные.
-    """
     db_path_env = os.environ.get("DB_PATH")
 
     if db_path_env:
         target = Path(db_path_env)
         target.parent.mkdir(parents=True, exist_ok=True)
 
-        # Если БД в AppData ещё не существует — ищем bundled копию
         if not target.exists():
             bundled = _find_bundled_db()
             if bundled and bundled.exists():
                 shutil.copy2(bundled, target)
                 print(f"[DB] Copied bundled database from {bundled} to {target}")
             else:
-                print(f"[DB] No bundled database found, a fresh one will be created at {target}")
+                print(f"[DB] No bundled database found, fresh DB will be created at {target}")
 
         return f"sqlite:///{target}"
 
-    # Fallback для разработки
     return "sqlite:///./timetable.db"
 
 
 def _find_bundled_db() -> Path | None:
     """
-    Ищет timetable.db рядом с исполняемым файлом.
-    В PyInstaller-сборке exe лежит в папке установки,
-    а _MEIPASS — временная папка распакованных ресурсов.
+    Ищет БД рядом с исполняемым файлом.
+    Tauri на Windows может скопировать timetable.db без расширения — проверяем оба варианта.
     """
     candidates = []
 
-    # Папка рядом с exe (папка установки — здесь ищем в первую очередь)
     if getattr(sys, 'frozen', False):
         exe_dir = Path(sys.executable).parent
-        candidates.append(exe_dir / "timetable.db")
+        candidates.append(exe_dir / "timetable.db")   # с расширением
+        candidates.append(exe_dir / "timetable")       # без расширения (баг Tauri на Windows)
 
-    # Папка рядом со скриптом
     candidates.append(Path(__file__).parent / "timetable.db")
+    candidates.append(Path(__file__).parent / "timetable")
 
     for candidate in candidates:
-        if candidate.exists():
+        if candidate.exists() and candidate.stat().st_size > 4096:
+            print(f"[DB] Found bundled database: {candidate}")
             return candidate
 
     return None

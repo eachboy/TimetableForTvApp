@@ -35,16 +35,14 @@
     "externalBin": [
       "binaries/backend"
     ],
+    "resources": [],
     "windows": {
       "wix": {},
       "nsis": {}
     },
     "linux": {
       "appimage": {}
-    },
-    "resources": [
-      "binaries/timetable.db"
-    ]
+    }
   },
   "plugins": {
     "updater": {

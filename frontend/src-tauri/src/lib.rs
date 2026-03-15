@@ -36,22 +36,42 @@ pub fn run() {
             std::fs::create_dir_all(&media_dir)
                 .expect("Failed to create media directory");
 
-            let (_rx, _child) = app
-                .shell()
-                .sidecar("backend")
-                .unwrap()
-                .env("DB_PATH", db_path.to_string_lossy().to_string())
-                .env("MEDIA_DIR", media_dir.to_string_lossy().to_string())
-                .spawn()
-                .expect("Failed to start backend sidecar");
+            let backend_started = match app.shell().sidecar("backend") {
+                Ok(cmd) => {
+                    match cmd
+                        .env("DB_PATH", db_path.to_string_lossy().to_string())
+                        .env("MEDIA_DIR", media_dir.to_string_lossy().to_string())
+                        .spawn()
+                    {
+                        Ok((_rx, child)) => {
+                            log::info!("Backend sidecar started");
+                            // Не дропаем child, иначе процесс бэкенда завершится при выходе из setup()
+                            std::mem::forget(child);
+                            true
+                        }
+                        Err(e) => {
+                            log::error!("Failed to start backend sidecar: {}", e);
+                            false
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::error!("Backend sidecar not found (binaries/backend): {}", e);
+                    false
+                }
+            };
 
             // Ждём, пока бэкенд поднимется (максимум 15 секунд), прежде чем
-            // показывать окно. Это исключает ситуацию, когда фронтенд грузится
-            // раньше API и получает ошибки сети.
+            // показывать окно. Если sidecar не запустился — показываем окно через 2 с.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                wait_for_backend(15).await;
-                log::info!("Backend is ready, showing window");
+                if backend_started {
+                    wait_for_backend(15).await;
+                    log::info!("Backend is ready, showing window");
+                } else {
+                    log::warn!("Backend not started, showing window anyway (user can start backend manually)");
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                }
 
                 if let Some(window) = handle.get_webview_window("main") {
                     let _ = window.show();

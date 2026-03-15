@@ -15,7 +15,7 @@ from jose import JWTError, jwt
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import logging
 
-from database import engine, get_db, Base
+from database import engine, get_db, Base, get_db_path, replace_database_from_file
 from models import Teacher, News, Media, Room, ScheduleItem, WeekType, SystemMetric, Notification, NotificationType, Account
 from schemas import (
     TeacherCreate, TeacherResponse,
@@ -85,6 +85,13 @@ def verify_password(password: str, password_hash: str) -> bool:
 from migrate import run_migrations
 run_migrations()
 Base.metadata.create_all(bind=engine)
+
+
+def _run_migrations_and_create_all():
+    """Применяет миграции и создаёт таблицы (после замены БД)."""
+    import database
+    run_migrations(database.engine)
+    Base.metadata.create_all(bind=database.engine)
 
 # JWT настройки
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production")
@@ -294,12 +301,20 @@ app = FastAPI(
 )
 
 # Настройка CORS
-# Поддерживаем различные порты для frontend и admin-panel
+# Поддерживаем различные порты для frontend и admin-panel, а также Tauri (desktop) приложения
 cors_origins = [
-    "http://localhost:3000",  # Frontend
-    "http://localhost:3001",  # Admin-panel
+    "http://localhost:3000",   # Frontend dev
+    "http://localhost:3001",   # Admin-panel dev
     "http://127.0.0.1:3000",
     "http://127.0.0.1:3001",
+    # Tauri 2: приложение загружается через asset protocol — Origin может быть asset.localhost
+    "https://asset.localhost",
+    "http://asset.localhost",
+    "https://localhost",
+    "http://localhost",
+    "http://127.0.0.1",
+    # WebView в некоторых конфигурациях отправляет origin "null"
+    "null",
 ]
 
 # Можно добавить дополнительные origins через переменную окружения
@@ -1230,6 +1245,50 @@ def login(login_data: LoginRequest, db: Session = Depends(get_db)):
 def get_current_user_info(current_user: Account = Depends(get_current_user)):
     """Получить информацию о текущем пользователе"""
     return current_user
+
+
+# ─── Экспорт / восстановление БД (только для авторизованных) ─────────────────
+
+@app.get("/api/database/export")
+def export_database(current_user: Account = Depends(get_current_user)):
+    """Скачать резервную копию базы данных (файл .db)."""
+    db_path = get_db_path()
+    if not db_path.exists():
+        raise HTTPException(status_code=404, detail="База данных не найдена")
+    return FileResponse(
+        path=db_path,
+        filename="timetable_backup.db",
+        media_type="application/x-sqlite3",
+    )
+
+
+@app.post("/api/database/restore")
+def restore_database(
+    file: UploadFile = File(...),
+    current_user: Account = Depends(get_current_user),
+):
+    """Загрузить базу данных из файла .db (заменит текущую, создаётся резервная копия)."""
+    if not file.filename or not file.filename.lower().endswith(".db"):
+        raise HTTPException(
+            status_code=400,
+            detail="Нужен файл с расширением .db",
+        )
+    import tempfile
+    tmp_path = None
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as tmp:
+        content = file.file.read()
+        if len(content) < 100:
+            raise HTTPException(status_code=400, detail="Файл слишком маленький или пустой")
+        tmp.write(content)
+        tmp_path = Path(tmp.name)
+    try:
+        replace_database_from_file(tmp_path)
+        _run_migrations_and_create_all()
+        return {"detail": "База данных успешно восстановлена. Рекомендуется перезапустить приложение."}
+    finally:
+        if tmp_path and tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+
 
 if __name__ == "__main__":
     import uvicorn

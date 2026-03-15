@@ -57,12 +57,15 @@ def _get_applied_versions(conn) -> set:
     return {row[0] for row in rows}
 
 
-def run_migrations():
+def run_migrations(eng=None):
     """
     Применяет все ещё не применённые миграции.
     Вызывать один раз при старте приложения — до create_all.
+    eng: опционально, двигатель для БД (если None — используется database.engine).
     """
-    with engine.connect() as conn:
+    from database import engine as default_engine
+    e = eng if eng is not None else default_engine
+    with e.connect() as conn:
         _ensure_version_table(conn)
         applied = _get_applied_versions(conn)
 

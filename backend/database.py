@@ -62,6 +62,45 @@ def _find_bundled_db() -> Path | None:
 
 SQLALCHEMY_DATABASE_URL = _resolve_db_path()
 
+
+def get_db_path() -> Path:
+    """Возвращает путь к файлу БД (для экспорта и замены)."""
+    url = SQLALCHEMY_DATABASE_URL
+    if url.startswith("sqlite:///"):
+        return Path(url.replace("sqlite:///", ""))
+    return Path("./timetable.db")
+
+
+def replace_database_from_file(uploaded_path: Path) -> None:
+    """
+    Заменяет текущую БД на загруженный файл. Вызывать только при отсутствии активных запросов.
+    После вызова нужно вызвать run_migrations() и create_all() с новым engine.
+    """
+    global engine, SessionLocal
+    db_path = get_db_path()
+    engine.dispose()
+    backup_path = db_path.with_suffix(db_path.suffix + ".backup")
+    if db_path.exists():
+        shutil.copy2(db_path, backup_path)
+    shutil.copy2(uploaded_path, db_path)
+    new_url = f"sqlite:///{db_path}"
+    engine = create_engine(
+        new_url,
+        connect_args={"check_same_thread": False},
+        pool_pre_ping=True,
+    )
+    event.listen(engine, "connect", _sqlite_pragma)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+def _sqlite_pragma(dbapi_conn, connection_record):
+    cursor = dbapi_conn.cursor()
+    cursor.execute("PRAGMA synchronous = FULL")
+    cursor.execute("PRAGMA journal_mode = WAL")
+    cursor.execute("PRAGMA busy_timeout = 30000")
+    cursor.close()
+
+
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
     connect_args={"check_same_thread": False},
@@ -71,11 +110,7 @@ engine = create_engine(
 
 @event.listens_for(engine, "connect")
 def set_sqlite_pragma(dbapi_conn, connection_record):
-    cursor = dbapi_conn.cursor()
-    cursor.execute("PRAGMA synchronous = FULL")
-    cursor.execute("PRAGMA journal_mode = WAL")
-    cursor.execute("PRAGMA busy_timeout = 30000")
-    cursor.close()
+    _sqlite_pragma(dbapi_conn, connection_record)
 
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

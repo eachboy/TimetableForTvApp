@@ -31,17 +31,33 @@ pub fn run() {
 
             let db_path = app_data_dir.join("timetable.db");
 
+            // Директория для медиафайлов — рядом с БД, чтобы пути не терялись между запусками
+            let media_dir = app_data_dir.join("media");
+            std::fs::create_dir_all(&media_dir)
+                .expect("Failed to create media directory");
+
             let (_rx, _child) = app
                 .shell()
                 .sidecar("backend")
                 .unwrap()
                 .env("DB_PATH", db_path.to_string_lossy().to_string())
+                .env("MEDIA_DIR", media_dir.to_string_lossy().to_string())
                 .spawn()
                 .expect("Failed to start backend sidecar");
 
-            // Запускаем фоновую задачу проверки обновлений в 22:00
+            // Ждём, пока бэкенд поднимется (максимум 15 секунд), прежде чем
+            // показывать окно. Это исключает ситуацию, когда фронтенд грузится
+            // раньше API и получает ошибки сети.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                wait_for_backend(15).await;
+                log::info!("Backend is ready, showing window");
+
+                if let Some(window) = handle.get_webview_window("main") {
+                    let _ = window.show();
+                }
+
+                // Запускаем фоновую задачу проверки обновлений в 22:00
                 loop {
                     let secs_until_22 = seconds_until_22_00();
                     log::info!("Next update check in {}s (at 22:00)", secs_until_22);
@@ -56,6 +72,35 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Опрашивает /api/health каждые 500 мс. Возвращает, когда бэкенд ответил OK
+/// или истёк таймаут (timeout_secs).
+async fn wait_for_backend(timeout_secs: u64) {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .unwrap_or_default();
+
+    let deadline = tokio::time::Instant::now()
+        + tokio::time::Duration::from_secs(timeout_secs);
+
+    loop {
+        match client.get("http://127.0.0.1:8000/api/health").send().await {
+            Ok(resp) if resp.status().is_success() => {
+                log::info!("Backend health check OK");
+                return;
+            }
+            _ => {}
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            log::warn!("Backend did not respond within {}s, continuing anyway", timeout_secs);
+            return;
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    }
 }
 
 /// Возвращает количество секунд до следующего наступления 22:00 по местному времени.

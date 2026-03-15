@@ -301,31 +301,43 @@ app = FastAPI(
 )
 
 # Настройка CORS
-# Поддерживаем различные порты для frontend и admin-panel, а также Tauri (desktop) приложения
+# Поддерживаем frontend, admin-panel и Tauri (desktop). Regex ловит все варианты localhost/asset.
+import os
+import re
 cors_origins = [
-    "http://localhost:3000",   # Frontend dev
-    "http://localhost:3001",   # Admin-panel dev
+    "http://localhost:3000",
+    "http://localhost:3001",
     "http://127.0.0.1:3000",
     "http://127.0.0.1:3001",
-    # Tauri 2: приложение загружается через asset protocol — Origin может быть asset.localhost
     "https://asset.localhost",
     "http://asset.localhost",
     "https://localhost",
     "http://localhost",
     "http://127.0.0.1",
-    # WebView в некоторых конфигурациях отправляет origin "null"
     "null",
 ]
-
-# Можно добавить дополнительные origins через переменную окружения
-import os
 env_origins = os.getenv("CORS_ORIGINS", "")
 if env_origins:
     cors_origins.extend(env_origins.split(","))
 
+# Любой origin с localhost, 127.0.0.1, asset.localhost или буквально "null" (Tauri webview)
+cors_origin_regex = re.compile(
+    r"^(https?://(localhost|127\.0\.0\.1)(:\d+)?|https?://asset\.localhost.*|null)$"
+)
+
+
+def _is_origin_allowed(origin: Optional[str]) -> bool:
+    if not origin:
+        return False
+    if origin in cors_origins:
+        return True
+    return bool(cors_origin_regex.fullmatch(origin))
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
+    allow_origin_regex=cors_origin_regex.pattern,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -474,15 +486,14 @@ async def options_media_file(media_id: int, request: Request):
         "Access-Control-Allow-Headers": "*",
     }
     
-    if origin and origin in cors_origins:
+    if origin and _is_origin_allowed(origin):
         headers["Access-Control-Allow-Origin"] = origin
         headers["Access-Control-Allow-Credentials"] = "true"
     elif cors_origins:
-        # Если origin не указан, используем первый из списка разрешенных
         headers["Access-Control-Allow-Origin"] = cors_origins[0]
     else:
         headers["Access-Control-Allow-Origin"] = "*"
-    
+
     return Response(status_code=200, headers=headers)
 
 @app.get("/api/media/{media_id}/file")
@@ -522,17 +533,12 @@ async def get_media_file(media_id: int, request: Request, db: Session = Depends(
         media_type=media_type
     )
     
-    # Устанавливаем CORS заголовки после создания response
-    # Важно: при allow_credentials=True нельзя использовать "*" для origin
-    if origin and origin in cors_origins:
-        # Если origin в списке разрешенных, используем его
+    if origin and _is_origin_allowed(origin):
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Credentials"] = "true"
     elif cors_origins:
-        # Если origin не указан или не в списке, используем первый из списка разрешенных
         response.headers["Access-Control-Allow-Origin"] = cors_origins[0]
     else:
-        # Fallback на "*" только если нет разрешенных origins
         response.headers["Access-Control-Allow-Origin"] = "*"
     
     response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"

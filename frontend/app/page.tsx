@@ -142,6 +142,7 @@ export default function Home() {
   }, []);
 
   // При монтировании — сначала ждём бэкенд, потом грузим данные
+  const [retryKey, setRetryKey] = useState(0);
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -149,13 +150,20 @@ export default function Home() {
       if (cancelled) return;
       if (ready) {
         setBackendStatus('ready');
+        await loadData(true);
       } else {
         setBackendStatus('timeout');
+        setLoading(false);
       }
-      await loadData(true);
     })();
     return () => { cancelled = true; };
-  }, [loadData]);
+  }, [loadData, retryKey]);
+
+  const handleRetryConnection = useCallback(() => {
+    setBackendStatus('waiting');
+    setLoading(true);
+    setRetryKey((k) => k + 1);
+  }, []);
 
   // Периодическое обновление каждые 30 секунд
   useEffect(() => {
@@ -180,14 +188,32 @@ export default function Home() {
     };
   }, [backendStatus, loadData]);
 
-  if (loading) {
+  if (loading || backendStatus === 'timeout') {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-black gap-3">
-        <div className="text-zinc-400 text-lg">
-          {backendStatus === 'waiting' ? 'Подключение к серверу...' : 'Загрузка...'}
+      <div className="min-h-screen flex flex-col items-center justify-center bg-black gap-4 px-4">
+        <div className="text-zinc-400 text-lg text-center">
+          {backendStatus === 'waiting' && 'Подключение к серверу...'}
+          {backendStatus === 'ready' && 'Загрузка...'}
+          {backendStatus === 'timeout' && 'Бэкенд не запущен'}
         </div>
         {backendStatus === 'waiting' && (
           <div className="text-zinc-600 text-sm">ожидание запуска backend</div>
+        )}
+        {backendStatus === 'timeout' && (
+          <>
+            <div className="text-zinc-500 text-sm text-center max-w-md">
+              Сервер не ответил за 30 сек. Перезапустите приложение или нажмите «Повторить».
+              <br />
+              Если не помогло — в папке приложения должен быть файл backend (exe).
+            </div>
+            <button
+              type="button"
+              onClick={handleRetryConnection}
+              className="px-4 py-2 rounded-lg bg-zinc-700 text-white hover:bg-zinc-600 text-sm font-medium"
+            >
+              Повторить
+            </button>
+          </>
         )}
       </div>
     );

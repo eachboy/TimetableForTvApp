@@ -6,7 +6,7 @@ import { NewsTicker } from '@/components/news-ticker';
 import { ScheduleSidebar } from '@/components/schedule-sidebar';
 import {
   fetchMedia, fetchNews, fetchRooms, fetchSchedule,
-  getClassTime, getCurrentWeekNumber,
+  getClassTime, getCurrentWeekNumber, isTauri, parseDateOnly,
   Media, News, Room, ScheduleItem
 } from '@/lib/api';
 import { useRouter } from 'next/navigation';
@@ -17,17 +17,19 @@ interface RoomWithSchedule {
   todayClasses: ScheduleItem[];
 }
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 
-/** Ждёт, пока бэкенд ответит на /api/health. Максимум timeoutMs мс. */
+/** Ждёт, пока бэкенд ответит на /api/health (только когда не в Tauri). Максимум timeoutMs мс. */
 async function waitForBackend(timeoutMs = 30_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
       const res = await fetch(`${API_URL}/api/health`, { signal: AbortSignal.timeout(2000) });
       if (res.ok) return true;
-    } catch {
-      // бэкенд ещё не готов
+    } catch (e) {
+      if (typeof console !== 'undefined' && console.debug) {
+        console.debug('[waitForBackend]', e);
+      }
     }
     await new Promise(r => setTimeout(r, 500));
   }
@@ -44,16 +46,31 @@ export default function Home() {
   const [backendStatus, setBackendStatus] = useState<'waiting' | 'ready' | 'timeout'>('waiting');
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Навигация стрелками: Left/Right — переключение медиа, Up/Down — переход к расписанию
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) {
+      if (e.key === 'ArrowLeft') {
         e.preventDefault();
-        router.push('/shedule');
+        if (mediaList.length > 1) {
+          setCurrentMediaIndex((prev) => (prev === 0 ? mediaList.length - 1 : prev - 1));
+        }
+        return;
+      }
+      if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        if (mediaList.length > 1) {
+          setCurrentMediaIndex((prev) => (prev + 1) % mediaList.length);
+        }
+        return;
+      }
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        router.push('/schedule');
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [router]);
+  }, [router, mediaList.length]);
 
   const currentMedia = mediaList.length > 0 ? mediaList[currentMediaIndex] : null;
 
@@ -86,7 +103,9 @@ export default function Home() {
       }
 
       const today = new Date();
-      const currentDayOfWeek = today.getDay() === 0 ? 6 : today.getDay() - 1;
+      today.setHours(0, 0, 0, 0);
+      // Пн=0 .. Сб=5; в воскресенье показываем понедельник (currentDayOfWeek = -1, все дни подходят)
+      const currentDayOfWeek = today.getDay() === 0 ? -1 : today.getDay() - 1;
       const currentWeek = getCurrentWeekNumber();
       const weekType = currentWeek % 2 === 0 ? 'even' : 'odd';
 
@@ -96,12 +115,17 @@ export default function Home() {
             const scheduleItems = await fetchSchedule({ room_id: room.id }).catch(() => []);
             const todayItems = scheduleItems
               .filter(item => {
-                const startDate = new Date(item.start_date);
-                const endDate = new Date(item.end_date);
+                const startDate = parseDateOnly(item.start_date);
+                const endDate = parseDateOnly(item.end_date);
+                if (!startDate || !endDate) return false;
+                const wt = (item.week_type ?? '').toLowerCase();
+                const dayMatch = currentDayOfWeek === -1
+                  ? item.day_of_week === 0
+                  : item.day_of_week === currentDayOfWeek;
                 return (
                   startDate <= today && endDate >= today &&
-                  item.day_of_week === currentDayOfWeek &&
-                  (item.week_type === 'both' || item.week_type === weekType)
+                  dayMatch &&
+                  (wt === 'both' || wt === weekType)
                 );
               })
               .sort((a, b) => a.class_number - b.class_number);
@@ -141,11 +165,23 @@ export default function Home() {
     }
   }, []);
 
-  // При монтировании — сначала ждём бэкенд, потом грузим данные
+  // При монтировании: в Tauri бэкенд уже готов (окно показывают после wait_for_backend), иначе ждём /api/health
   const [retryKey, setRetryKey] = useState(0);
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      // В Tauri данные берутся из локальной БД, бэкенд не нужен
+      let inTauri = isTauri();
+      if (!inTauri) {
+        await new Promise((r) => setTimeout(r, 100));
+        inTauri = isTauri();
+      }
+      if (cancelled) return;
+      if (inTauri) {
+        setBackendStatus('ready');
+        await loadData(true);
+        return;
+      }
       const ready = await waitForBackend(30_000);
       if (cancelled) return;
       if (ready) {

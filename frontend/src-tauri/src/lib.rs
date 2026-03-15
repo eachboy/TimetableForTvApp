@@ -1,17 +1,77 @@
 // src-tauri/src/lib.rs  (Frontend)
 
 use tauri::Manager;
-use tauri_plugin_shell::ShellExt;
 use tauri_plugin_updater::UpdaterExt;
 
+pub mod api_server;
+pub mod db;
 mod mdns_discovery;
 use mdns_discovery::discover_update_server;
+
+#[tauri::command]
+fn api_health() -> Result<serde_json::Value, String> {
+    Ok(serde_json::json!({
+        "status": "healthy",
+        "timestamp": chrono::Utc::now().to_rfc3339()
+    }))
+}
+
+#[tauri::command]
+fn api_get_media(skip: Option<i64>, limit: Option<i64>) -> Result<Vec<db::MediaRow>, String> {
+    db::get_media(skip.unwrap_or(0), limit.unwrap_or(100))
+}
+
+#[tauri::command]
+fn api_get_media_file_path(media_id: i64) -> Result<Option<String>, String> {
+    db::get_media_file_path(media_id).map(|opt| opt.map(|p| p.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+fn api_get_news(skip: Option<i64>, limit: Option<i64>) -> Result<Vec<db::NewsRow>, String> {
+    db::get_news(skip.unwrap_or(0), limit.unwrap_or(100))
+}
+
+#[tauri::command]
+fn api_get_rooms(skip: Option<i64>, limit: Option<i64>) -> Result<Vec<db::RoomRow>, String> {
+    db::get_rooms(skip.unwrap_or(0), limit.unwrap_or(100))
+}
+
+#[tauri::command]
+fn api_get_schedule(
+    room_id: Option<i64>,
+    teacher_id: Option<i64>,
+    day_of_week: Option<i64>,
+    skip: Option<i64>,
+    limit: Option<i64>,
+) -> Result<Vec<db::ScheduleItemRow>, String> {
+    db::get_schedule(
+        room_id,
+        teacher_id,
+        day_of_week,
+        skip.unwrap_or(0),
+        limit.unwrap_or(1000),
+    )
+}
+
+#[tauri::command]
+fn api_get_schedule_upcoming(limit: Option<i64>) -> Result<Vec<db::ScheduleItemRow>, String> {
+    db::get_schedule_upcoming(limit.unwrap_or(20))
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .invoke_handler(tauri::generate_handler![
+            api_health,
+            api_get_media,
+            api_get_media_file_path,
+            api_get_news,
+            api_get_rooms,
+            api_get_schedule,
+            api_get_schedule_upcoming,
+        ])
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -31,59 +91,73 @@ pub fn run() {
 
             let db_path = app_data_dir.join("timetable.db");
 
-            // Директория для медиафайлов — рядом с БД, чтобы пути не терялись между запусками
-            let media_dir = app_data_dir.join("media");
-            std::fs::create_dir_all(&media_dir)
-                .expect("Failed to create media directory");
+            // Копируем БД при первом запуске: ресурсы сборки или backend/ в проекте (dev)
+            if !db_path.exists() {
+                let src = app.path().resource_dir().ok().and_then(|p| {
+                    [p.join("timetable.db"), p.join("backend").join("timetable.db")]
+                        .into_iter()
+                        .find(|c| c.exists() && c.metadata().map(|m| m.len() > 1000).unwrap_or(false))
+                }).or_else(|| {
+                    std::env::current_dir().ok().and_then(|c| {
+                        [c.join("backend").join("timetable.db"), c.join("..").join("backend").join("timetable.db")]
+                            .into_iter()
+                            .find(|b| b.exists() && b.metadata().map(|m| m.len() > 1000).unwrap_or(false))
+                    })
+                });
+                if let Some(ref src) = src {
+                    if std::fs::copy(src, &db_path).is_ok() {
+                        log::info!("Copied database from {} to {}", src.display(), db_path.display());
+                    }
+                }
+            }
 
-            let backend_started = match app.shell().sidecar("backend") {
-                Ok(cmd) => {
-                    match cmd
-                        .env("DB_PATH", db_path.to_string_lossy().to_string())
-                        .env("MEDIA_DIR", media_dir.to_string_lossy().to_string())
-                        .spawn()
-                    {
-                        Ok((_rx, child)) => {
-                            log::info!("Backend sidecar started");
-                            // Не дропаем child, иначе процесс бэкенда завершится при выходе из setup()
-                            std::mem::forget(child);
-                            true
-                        }
-                        Err(e) => {
-                            log::error!("Failed to start backend sidecar: {}", e);
-                            false
+            let media_dir = app_data_dir.join("media");
+            std::fs::create_dir_all(&media_dir).expect("Failed to create media directory");
+
+            if let Err(e) = db::init(&db_path, &media_dir) {
+                log::error!("DB init failed: {}", e);
+            } else {
+                // Если БД пустая — пробуем подставить из ресурсов или из backend/ (для dev)
+                if let Ok((rooms, media)) = db::count_rooms_and_media() {
+                    if rooms == 0 && media == 0 {
+                        let fallback = app.path().resource_dir().ok().and_then(|p| {
+                            [p.join("timetable.db"), p.join("backend").join("timetable.db")]
+                                .into_iter()
+                                .find(|c| c.exists() && c.metadata().map(|m| m.len() > 1000).unwrap_or(false))
+                        }).or_else(|| {
+                            std::env::current_dir().ok().and_then(|c| {
+                                let candidates = [
+                                    c.join("backend").join("timetable.db"),
+                                    c.join("..").join("backend").join("timetable.db"),
+                                ];
+                                candidates.into_iter().find(|b| {
+                                    b.exists() && b.metadata().map(|m| m.len() > 1000).unwrap_or(false)
+                                })
+                            })
+                        });
+                        if let Some(src) = fallback {
+                            if std::fs::copy(&src, &db_path).is_ok() {
+                                log::info!("Filled empty DB from {}", src.display());
+                            }
                         }
                     }
                 }
-                Err(e) => {
-                    log::error!("Backend sidecar not found (binaries/backend): {}", e);
-                    false
-                }
-            };
+                log::info!("Local DB ready at {}", db_path.display());
+                let addr: std::net::SocketAddr = ([0, 0, 0, 0], 8000).into();
+                api_server::run_api_server(addr, media_dir.clone());
+            }
 
-            // Ждём, пока бэкенд поднимется (максимум 15 секунд), прежде чем
-            // показывать окно. Если sidecar не запустился — показываем окно через 2 с.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                if backend_started {
-                    wait_for_backend(15).await;
-                    log::info!("Backend is ready, showing window");
-                } else {
-                    log::warn!("Backend not started, showing window anyway (user can start backend manually)");
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                }
-
                 if let Some(window) = handle.get_webview_window("main") {
                     let _ = window.show();
                 }
 
-                // Запускаем фоновую задачу проверки обновлений в 22:00
                 loop {
                     let secs_until_22 = seconds_until_22_00();
                     log::info!("Next update check in {}s (at 22:00)", secs_until_22);
                     tokio::time::sleep(tokio::time::Duration::from_secs(secs_until_22)).await;
                     check_and_apply_update(&handle).await;
-                    // После проверки спим 60 секунд чтобы не проверять дважды в одну минуту
                     tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
                 }
             });
@@ -92,35 +166,6 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-/// Опрашивает /api/health каждые 500 мс. Возвращает, когда бэкенд ответил OK
-/// или истёк таймаут (timeout_secs).
-async fn wait_for_backend(timeout_secs: u64) {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .unwrap_or_default();
-
-    let deadline = tokio::time::Instant::now()
-        + tokio::time::Duration::from_secs(timeout_secs);
-
-    loop {
-        match client.get("http://127.0.0.1:8000/api/health").send().await {
-            Ok(resp) if resp.status().is_success() => {
-                log::info!("Backend health check OK");
-                return;
-            }
-            _ => {}
-        }
-
-        if tokio::time::Instant::now() >= deadline {
-            log::warn!("Backend did not respond within {}s, continuing anyway", timeout_secs);
-            return;
-        }
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    }
 }
 
 /// Возвращает количество секунд до следующего наступления 22:00 по местному времени.

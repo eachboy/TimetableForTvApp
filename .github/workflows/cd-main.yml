@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Версия релиза (например: 1.0.0)"
+        description: "Версия релиза (например: 1.1.1)"
         required: true
-        default: "1.0.0"
+        default: "1.1.1"
       prerelease:
         description: "Пре-релиз?"
         required: true
@@ -21,175 +21,23 @@ permissions:
 
 jobs:
   # ═══════════════════════════════════════════════
-  #  BACKEND — нагрузочный тест + сборка бинарника
-  # ═══════════════════════════════════════════════
-  backend-build:
-    name: 🐍 Backend — Build & Load Test (${{ matrix.os-name }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            os-name: Linux
-            binary-name: backend-x86_64-unknown-linux-gnu
-          - os: windows-latest
-            os-name: Windows
-            binary-name: backend-x86_64-pc-windows-msvc.exe
-
-    defaults:
-      run:
-        working-directory: backend
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-          cache-dependency-path: backend/requirements.txt
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Install PyInstaller
-        run: pip install pyinstaller
-
-      # Используем backend.spec — он содержит все hiddenimports (migrate, bcrypt, jose и др.)
-      - name: Build backend binary
-        run: pyinstaller backend.spec --clean --distpath dist
-
-      - name: Rename binary for Tauri sidecar
-        shell: bash
-        run: |
-          if [ "${{ matrix.os }}" == "windows-latest" ]; then
-            mv dist/backend.exe dist/${{ matrix.binary-name }}
-          else
-            mv dist/backend dist/${{ matrix.binary-name }}
-          fi
-
-      # Генерируем чистую seed-БД со всеми таблицами и системным аккаунтом.
-      # Если timetable.db уже есть в репозитории — используем его как есть.
-      # Seed-БД копируется в dist/ и потом Tauri бандлит её как resource.
-      # database.py при первом запуске на новой машине скопирует её в AppData.
-      - name: Generate seed database
-        shell: bash
-        run: |
-          if [ -f "timetable.db" ]; then
-            echo "✅ timetable.db found in repo, using it as seed"
-            cp timetable.db dist/timetable.db
-          else
-            echo "⚠️ timetable.db not in repo — generating fresh seed DB"
-            python -c "
-          from database import SessionLocal, Base, engine
-          from models import Account
-          from main import hash_password
-          import os, shutil
-          Base.metadata.create_all(bind=engine)
-          db = SessionLocal()
-          existing = db.query(Account).filter(Account.username == 'admin').first()
-          if not existing:
-              acc = Account(username='admin', password_hash=hash_password('admin'))
-              db.add(acc)
-              db.commit()
-              print('✅ Default admin account created (change password after first login!)')
-          db.close()
-          "
-            cp timetable.db dist/timetable.db
-            echo "✅ Fresh seed DB created and copied to dist/"
-          fi
-
-      - name: Run load test (Linux only)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          pip install locust
-          # Запускаем бинарник с явными путями к БД и медиа
-          # (PyInstaller-бинарник стартует медленнее обычного Python, даём 15 сек)
-          DB_PATH=/tmp/test_timetable.db \
-          MEDIA_DIR=/tmp/test_media \
-          ./dist/${{ matrix.binary-name }} &
-          echo "Waiting for backend to start..."
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:8000/api/health > /dev/null 2>&1; then
-              echo "✅ Backend is up after ${i}s"
-              break
-            fi
-            sleep 1
-          done
-          python -c "
-          import os
-          os.environ['DB_PATH'] = '/tmp/test_timetable.db'
-          from database import SessionLocal, Base, engine
-          from models import Account
-          from main import hash_password
-          Base.metadata.create_all(bind=engine)
-          db = SessionLocal()
-          existing = db.query(Account).filter(Account.username == '${{ secrets.BACKEND_TEST_USERNAME }}').first()
-          if not existing:
-              acc = Account(
-                  username='${{ secrets.BACKEND_TEST_USERNAME }}',
-                  password_hash=hash_password('${{ secrets.BACKEND_TEST_PASSWORD }}')
-              )
-              db.add(acc)
-              db.commit()
-          db.close()
-          " || echo "⚠️ DB init skipped"
-          locust -f tests/locustfile.py \
-            --headless \
-            --users 100 \
-            --spawn-rate 20 \
-            --run-time 60s \
-            --host http://localhost:8000 \
-            --html load-report.html \
-            --csv load-stats || echo "⚠️ Load test skipped"
-        continue-on-error: true
-        env:
-          BACKEND_TEST_USERNAME: ${{ secrets.BACKEND_TEST_USERNAME }}
-          BACKEND_TEST_PASSWORD: ${{ secrets.BACKEND_TEST_PASSWORD }}
-
-      - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: backend-binary-${{ matrix.os-name }}-${{ github.sha }}
-          path: |
-            backend/dist/${{ matrix.binary-name }}
-            backend/dist/timetable.db
-          retention-days: 1
-
-      - name: Upload load test results
-        uses: actions/upload-artifact@v4
-        if: matrix.os == 'ubuntu-latest'
-        with:
-          name: backend-load-report-${{ github.sha }}
-          path: |
-            backend/load-report.html
-            backend/load-stats*.csv
-          retention-days: 30
-
-  # ═══════════════════════════════════════════════
   #  FRONTEND — сборка Tauri под Windows и Linux
   # ═══════════════════════════════════════════════
   frontend-build-exe:
     name: ⚛️ Frontend — Build Tauri (${{ matrix.os-name }})
     runs-on: ${{ matrix.os }}
-    needs: backend-build
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: windows-latest
             os-name: Windows
-            binary-name: backend-x86_64-pc-windows-msvc.exe
             artifact-path: |
               frontend/src-tauri/target/release/bundle/msi/*.msi
               frontend/src-tauri/target/release/bundle/nsis/*.exe
             artifact-name: frontend-windows
           - os: ubuntu-latest
             os-name: Linux
-            binary-name: backend-x86_64-unknown-linux-gnu
             artifact-path: |
               frontend/src-tauri/target/release/bundle/deb/*.deb
               frontend/src-tauri/target/release/bundle/appimage/*.AppImage
@@ -203,24 +51,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download backend binary
-        uses: actions/download-artifact@v4
-        with:
-          name: backend-binary-${{ matrix.os-name }}-${{ github.sha }}
-          path: frontend/src-tauri/binaries/
-
-      - name: Fix binary permissions (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: chmod +x src-tauri/binaries/${{ matrix.binary-name }}
-
-      - name: Copy bundled database to binaries folder
-        shell: bash
-        run: |
-          if [ -f src-tauri/binaries/timetable.db ]; then
-            echo "✅ timetable.db found in binaries/"
-          else
-            echo "⚠️ timetable.db not found, app will start with empty database"
-          fi
+      - name: Ensure timetable.db exists for Tauri build
+        run: node -e "const fs=require('fs'); const p='src-tauri/timetable.db'; if(!fs.existsSync(p)) fs.writeFileSync(p,'');"
 
       - name: Set up Node.js 22
         uses: actions/setup-node@v4
@@ -340,7 +172,7 @@ jobs:
           retention-days: 30
 
   # ═══════════════════════════════════════════════
-  #  RELEASE — создаём GitHub Release
+  #  RELEASE — создаём GitHub Release (версия из package.json)
   # ═══════════════════════════════════════════════
   release:
     name: 🚀 Create GitHub Release
@@ -365,9 +197,9 @@ jobs:
             echo "name=v${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
             echo "prerelease=${{ github.event.inputs.prerelease }}" >> $GITHUB_OUTPUT
           else
-            SHORT=$(echo ${{ github.sha }} | cut -c1-7)
-            echo "tag=release-${SHORT}" >> $GITHUB_OUTPUT
-            echo "name=Release ${SHORT}" >> $GITHUB_OUTPUT
+            VERSION=$(node -p "require('./frontend/package.json').version")
+            echo "tag=v${VERSION}" >> $GITHUB_OUTPUT
+            echo "name=v${VERSION}" >> $GITHUB_OUTPUT
             echo "prerelease=false" >> $GITHUB_OUTPUT
           fi
 
@@ -387,10 +219,7 @@ jobs:
             ### Содержимое:
             - 🖥️ Admin Panel — Windows (`.exe`, `.msi`) и Linux (`.deb`, `.AppImage`)
             - ⚛️ Frontend — Windows (`.exe`, `.msi`) и Linux (`.deb`, `.AppImage`)
-            - 🐍 Backend встроен в Frontend
-
-            ### Нагрузочные тесты:
-            Отчёт доступен в разделе **Actions → Artifacts**
+            - API встроен в Frontend (Rust)
           files: |
             release-assets/**/*.exe
             release-assets/**/*.msi

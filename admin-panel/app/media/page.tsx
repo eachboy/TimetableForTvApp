@@ -128,7 +128,7 @@ export default function MediaPage() {
                 <DialogHeader>
                   <DialogTitle>Добавить новое медиа</DialogTitle>
                   <DialogDescription>
-                    Введите название медиа и выберите файл для добавления в систему
+                    Введите название и выберите файл. Поддерживаются изображения (JPG, PNG, WebP и др.) и видео (MP4, WebM, AVI, MOV и др.).
                   </DialogDescription>
                 </DialogHeader>
                 <FieldGroup>
@@ -147,7 +147,7 @@ export default function MediaPage() {
                     <Input
                       id="mediaFile"
                       type="file"
-                      accept="image/*,video/*"
+                      accept="image/*,video/*,.mp4,.webm,.avi,.mov,.wmv,.flv,.jpg,.jpeg,.png,.gif,.webp,.svg"
                       onChange={(e) => {
                         const file = e.target.files?.[0] || null
                         if (file) {

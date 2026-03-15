@@ -34,8 +34,7 @@ import {
 } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Card, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
-import { getRooms, createRoom, deleteRoom, getSchedule, getCurrentWeekType, type Room, type ScheduleItem } from "@/lib/api"
-import { getClassTime } from "@/lib/api"
+import { getRooms, createRoom, deleteRoom, getSchedule, getCurrentWeekType, getClassTime, parseDateOnly, type Room, type ScheduleItem } from "@/lib/api"
 
 export default function RoomsPage() {
   const [rooms, setRooms] = React.useState<Room[]>([])
@@ -58,23 +57,23 @@ export default function RoomsPage() {
       const schedules: Record<number, { nextClass?: string; teacher?: string; group?: string; subject?: string }> = {}
       const today = new Date()
       today.setHours(0, 0, 0, 0)
-      const currentDayOfWeek = today.getDay() === 0 ? 6 : today.getDay() - 1
+      const currentDayOfWeek = today.getDay() === 0 ? -1 : today.getDay() - 1
       const weekType = getCurrentWeekType()
 
       for (const room of roomsData) {
         try {
           const scheduleItems = await getSchedule({ room_id: room.id })
           
-          // Находим следующую пару (учитываем тип недели: чётная/нечётная)
+          const wt = (v: string) => (v ?? '').toLowerCase()
           const upcomingItems = scheduleItems
             .filter((item: ScheduleItem) => {
-              const startDate = new Date(item.start_date)
-              startDate.setHours(0, 0, 0, 0)
-              const endDate = new Date(item.end_date)
+              const startDate = parseDateOnly(item.start_date)
+              const endDate = parseDateOnly(item.end_date)
+              if (!startDate || !endDate) return false
               endDate.setHours(23, 59, 59, 999)
               const inDateRange = startDate <= today && endDate >= today
               const isTodayOrLater = item.day_of_week >= currentDayOfWeek
-              const weekTypeMatch = item.week_type === 'both' || item.week_type === weekType
+              const weekTypeMatch = wt(item.week_type) === 'both' || wt(item.week_type) === weekType
               return inDateRange && isTodayOrLater && weekTypeMatch
             })
             .sort((a: ScheduleItem, b: ScheduleItem) => {

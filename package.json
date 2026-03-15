@@ -2,9 +2,11 @@
   "name": "timetable-for-tv-app",
   "private": true,
   "scripts": {
-    "dev": "concurrently -n backend,frontend -c blue,green \"cd backend && python -m uvicorn main:app --reload --port 8000\" \"cd frontend && npm run dev\"",
+    "dev": "npm run dev:frontend",
     "dev:frontend": "cd frontend && npm run dev",
-    "dev:backend": "cd backend && python -m uvicorn main:app --reload --port 8000"
+    "test": "cd frontend && npm test && cd src-tauri && cargo test && cd ../.. && cd admin-panel && npm test",
+    "test:frontend": "cd frontend && npm test && cd src-tauri && cargo test",
+    "test:admin": "cd admin-panel && npm test"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"

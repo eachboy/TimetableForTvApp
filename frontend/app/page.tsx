@@ -4,13 +4,34 @@ import { CurrentTime } from '@/components/current-time';
 import { MediaPlayer } from '@/components/media-player';
 import { NewsTicker } from '@/components/news-ticker';
 import { ScheduleSidebar } from '@/components/schedule-sidebar';
-import { fetchMedia, fetchNews, fetchRooms, fetchSchedule, getClassTime, getCurrentWeekNumber, Media, News, Room, ScheduleItem } from '@/lib/api';
+import {
+  fetchMedia, fetchNews, fetchRooms, fetchSchedule,
+  getClassTime, getCurrentWeekNumber,
+  Media, News, Room, ScheduleItem
+} from '@/lib/api';
 import { useRouter } from 'next/navigation';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 interface RoomWithSchedule {
   room: Room;
   todayClasses: ScheduleItem[];
+}
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
+/** Ждёт, пока бэкенд ответит на /api/health. Максимум timeoutMs мс. */
+async function waitForBackend(timeoutMs = 30_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${API_URL}/api/health`, { signal: AbortSignal.timeout(2000) });
+      if (res.ok) return true;
+    } catch {
+      // бэкенд ещё не готов
+    }
+    await new Promise(r => setTimeout(r, 500));
+  }
+  return false;
 }
 
 export default function Home() {
@@ -20,6 +41,8 @@ export default function Home() {
   const [roomsWithSchedule, setRoomsWithSchedule] = useState<RoomWithSchedule[]>([]);
   const [news, setNews] = useState<News[]>([]);
   const [loading, setLoading] = useState(true);
+  const [backendStatus, setBackendStatus] = useState<'waiting' | 'ready' | 'timeout'>('waiting');
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -118,17 +141,54 @@ export default function Home() {
     }
   }, []);
 
-  useEffect(() => { loadData(true); }, [loadData]);
-
+  // При монтировании — сначала ждём бэкенд, потом грузим данные
   useEffect(() => {
-    const interval = setInterval(() => loadData(false), 30000);
+    let cancelled = false;
+    (async () => {
+      const ready = await waitForBackend(30_000);
+      if (cancelled) return;
+      if (ready) {
+        setBackendStatus('ready');
+      } else {
+        setBackendStatus('timeout');
+      }
+      await loadData(true);
+    })();
+    return () => { cancelled = true; };
+  }, [loadData]);
+
+  // Периодическое обновление каждые 30 секунд
+  useEffect(() => {
+    const interval = setInterval(() => loadData(false), 30_000);
     return () => clearInterval(interval);
   }, [loadData]);
 
+  // Если бэкенд не ответил — повторяем попытку загрузки каждые 5 секунд
+  useEffect(() => {
+    if (backendStatus === 'timeout') {
+      retryTimerRef.current = setInterval(async () => {
+        const ready = await waitForBackend(3_000);
+        if (ready) {
+          setBackendStatus('ready');
+          clearInterval(retryTimerRef.current!);
+          loadData(true);
+        }
+      }, 5_000);
+    }
+    return () => {
+      if (retryTimerRef.current) clearInterval(retryTimerRef.current);
+    };
+  }, [backendStatus, loadData]);
+
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-black">
-        <div className="text-zinc-400">Загрузка...</div>
+      <div className="min-h-screen flex flex-col items-center justify-center bg-black gap-3">
+        <div className="text-zinc-400 text-lg">
+          {backendStatus === 'waiting' ? 'Подключение к серверу...' : 'Загрузка...'}
+        </div>
+        {backendStatus === 'waiting' && (
+          <div className="text-zinc-600 text-sm">ожидание запуска backend</div>
+        )}
       </div>
     );
   }

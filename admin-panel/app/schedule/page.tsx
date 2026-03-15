@@ -21,7 +21,7 @@ import { Separator } from "@/components/ui/separator"
 import { Label } from "@/components/ui/label"
 import { Button } from "@/components/ui/button"
 import { IconChevronLeft, IconChevronRight } from "@tabler/icons-react"
-import { getSchedule, getRooms, type ScheduleItem as APIScheduleItem, type Room } from "@/lib/api"
+import { getSchedule, getRooms, parseDateOnly, type ScheduleItem as APIScheduleItem, type Room } from "@/lib/api"
 import { toast } from "sonner"
 
 interface ScheduleItem {
@@ -276,28 +276,22 @@ export default function SchedulePage() {
       // Определяем тип выбранной недели (четная/нечетная) на основе даты начала недели
       const currentWeekType = getWeekTypeFromDate(weekStart)
       
-      // Заполняем расписание
+      const wt = (v: string) => (v ?? '').toLowerCase()
       for (const item of scheduleData) {
         if (item.room && item.teacher) {
           const roomNumber = item.room.number
           const dayName = DAY_NAMES[item.day_of_week]
           const pairNumber = item.class_number.toString()
           
-          // Проверяем, попадает ли выбранная неделя в диапазон дат занятия
-          const itemStartDate = new Date(item.start_date)
-          itemStartDate.setHours(0, 0, 0, 0)
-          const itemEndDate = new Date(item.end_date)
+          const itemStartDate = parseDateOnly(item.start_date)
+          const itemEndDate = parseDateOnly(item.end_date)
+          if (!itemStartDate || !itemEndDate) continue
           itemEndDate.setHours(23, 59, 59, 999)
           
-          // Проверяем пересечение диапазонов дат
           const isDateRangeValid = itemStartDate <= weekEnd && itemEndDate >= weekStart
+          if (!isDateRangeValid) continue
           
-          if (!isDateRangeValid) {
-            continue
-          }
-          
-          // Проверяем тип недели (четная/нечетная/обе)
-          if (item.week_type === 'both' || item.week_type === currentWeekType) {
+          if (wt(item.week_type) === 'both' || wt(item.week_type) === currentWeekType) {
             if (scheduleMap[roomNumber] && scheduleMap[roomNumber][dayName]) {
               scheduleMap[roomNumber][dayName][pairNumber] = {
                 subject: item.subject,

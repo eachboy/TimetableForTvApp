@@ -22,7 +22,11 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**/*"]
+      }
     }
   },
   "bundle": {
@@ -32,10 +36,8 @@
       "icons/icon.png",
       "icons/icon.ico"
     ],
-    "externalBin": [
-      "binaries/backend"
-    ],
-    "resources": [],
+    "externalBin": [],
+    "resources": ["timetable.db"],
     "windows": {
       "wix": {},
       "nsis": {}

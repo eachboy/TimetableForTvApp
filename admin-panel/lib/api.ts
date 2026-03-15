@@ -1,7 +1,4 @@
-// Автоматически определяем адрес backend
-// 1. Пробуем NEXT_PUBLIC_API_URL (если задан при сборке)
-// 2. Пробуем локальный IP компьютера (определяем через RTCPeerConnection)
-// 3. Fallback на localhost:8000
+const DEFAULT_API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000';
 
 let resolvedApiUrl: string | null = null;
 
@@ -54,34 +51,90 @@ async function checkUrl(url: string): Promise<boolean> {
 export async function getApiUrl(): Promise<string> {
   if (resolvedApiUrl) return resolvedApiUrl;
 
-  // 1. Если задан явно при сборке
+  // 1. Если задан явно при сборке — используем его
   if (process.env.NEXT_PUBLIC_API_URL) {
     resolvedApiUrl = process.env.NEXT_PUBLIC_API_URL;
+    console.log('[API] Backend (env):', resolvedApiUrl);
     return resolvedApiUrl;
   }
 
-  // 2. Пробуем определить IP компьютера в сети
-  const localIP = await detectLocalIP();
-  if (localIP) {
-    const networkUrl = `http://${localIP}:8000`;
-    const isAvailable = await checkUrl(networkUrl);
-    if (isAvailable) {
-      resolvedApiUrl = networkUrl;
-      console.log(`[API] Connected to network backend: ${networkUrl}`);
+  // 2. С localhost/127.0.0.1 сначала пробуем 127.0.0.1:8000 (обычный dev)
+  if (typeof window !== 'undefined' && /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(window.location.host)) {
+    if (await checkUrl(DEFAULT_API_URL)) {
+      resolvedApiUrl = DEFAULT_API_URL;
+      console.log('[API] Backend (local):', resolvedApiUrl);
       return resolvedApiUrl;
     }
   }
 
-  // 3. Fallback на localhost
-  resolvedApiUrl = 'http://localhost:8000';
-  console.log(`[API] Using localhost backend`);
+  // 3. Пробуем локальный IP в сети (для доступа с других устройств в LAN)
+  const localIP = await detectLocalIP();
+  if (localIP) {
+    const networkUrl = `http://${localIP}:8000`;
+    if (await checkUrl(networkUrl)) {
+      resolvedApiUrl = networkUrl;
+      console.log('[API] Backend (network):', resolvedApiUrl);
+      return resolvedApiUrl;
+    }
+  }
+
+  // 4. Fallback: 127.0.0.1:8000
+  resolvedApiUrl = DEFAULT_API_URL;
+  console.log('[API] Backend (fallback):', resolvedApiUrl);
   return resolvedApiUrl;
 }
 
-// Обёртка для fetch с автоматическим определением URL
+// Обёртка для fetch с автоматическим определением URL. При !res.ok бросает Error с текстом от бэкенда (detail).
 async function apiFetch(path: string, options?: RequestInit): Promise<Response> {
   const baseUrl = await getApiUrl();
-  return fetch(`${baseUrl}${path}`, options);
+  const res = await fetch(`${baseUrl}${path}`, options);
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const text = await res.text();
+      const j = JSON.parse(text) as { detail?: string };
+      if (j?.detail) detail = j.detail;
+      else if (text) detail = text;
+    } catch {
+      // ignore
+    }
+    throw new Error(`${res.status}: ${detail}`);
+  }
+  return res;
+}
+
+// GET + parse JSON. Гарантирует массив для списков (преподаватели, кабинеты, расписание и т.д.).
+async function apiGetJson<T>(path: string): Promise<T> {
+  const res = await apiFetch(path);
+  try {
+    const data = await res.json();
+    return data as T;
+  } catch {
+    throw new Error('Некорректный ответ сервера (не JSON)');
+  }
+}
+
+/** Для списков: всегда возвращаем массив. Проверяем Content-Type и формат ответа. */
+async function apiGetList<T>(path: string): Promise<T[]> {
+  const res = await apiFetch(path);
+  const contentType = res.headers.get('Content-Type') ?? '';
+  if (!contentType.includes('application/json')) {
+    console.warn('[API] Ответ не JSON:', path, 'Content-Type:', contentType);
+    return [];
+  }
+  let data: unknown;
+  try {
+    data = await res.json();
+  } catch (e) {
+    console.warn('[API] Ошибка разбора JSON:', path, e);
+    throw new Error('Некорректный ответ сервера (не JSON)');
+  }
+  if (Array.isArray(data)) return data as T[];
+  if (data != null && typeof data === 'object' && 'data' in data && Array.isArray((data as { data: unknown }).data)) {
+    return (data as { data: T[] }).data;
+  }
+  console.warn('[API] Ожидался массив, получено:', typeof data, JSON.stringify(data).slice(0, 300));
+  return [];
 }
 
 export interface Teacher {
@@ -160,15 +213,14 @@ export async function login(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
   });
-  if (!res.ok) throw new Error('Неверный логин или пароль');
-  return res.json();
+  return res.json().catch(() => {
+    throw new Error('Неверный логин или пароль');
+  });
 }
 
 // Teachers
 export async function fetchTeachers(): Promise<Teacher[]> {
-  const res = await apiFetch('/api/teachers');
-  if (!res.ok) throw new Error('Ошибка загрузки преподавателей');
-  return res.json();
+  return apiGetList<Teacher>('/api/teachers');
 }
 
 export async function createTeacher(name: string, token?: string): Promise<Teacher> {
@@ -178,24 +230,22 @@ export async function createTeacher(name: string, token?: string): Promise<Teach
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${t}` },
     body: JSON.stringify({ name }),
   });
-  if (!res.ok) throw new Error('Ошибка создания преподавателя');
-  return res.json();
+  return res.json().catch(() => {
+    throw new Error('Ошибка создания преподавателя');
+  });
 }
 
 export async function deleteTeacher(id: number, token?: string): Promise<void> {
   const t = token ?? getStoredToken();
-  const res = await apiFetch(`/api/teachers/${id}`, {
+  await apiFetch(`/api/teachers/${id}`, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${t}` },
   });
-  if (!res.ok) throw new Error('Ошибка удаления преподавателя');
 }
 
 // Rooms
 export async function fetchRooms(): Promise<Room[]> {
-  const res = await apiFetch('/api/rooms');
-  if (!res.ok) throw new Error('Ошибка загрузки кабинетов');
-  return res.json();
+  return apiGetList<Room>('/api/rooms');
 }
 
 export async function createRoom(number: string, token?: string): Promise<Room> {
@@ -205,24 +255,22 @@ export async function createRoom(number: string, token?: string): Promise<Room> 
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${t}` },
     body: JSON.stringify({ number }),
   });
-  if (!res.ok) throw new Error('Ошибка создания кабинета');
-  return res.json();
+  return res.json().catch(() => {
+    throw new Error('Ошибка создания кабинета');
+  });
 }
 
 export async function deleteRoom(id: number, token?: string): Promise<void> {
   const t = token ?? getStoredToken();
-  const res = await apiFetch(`/api/rooms/${id}`, {
+  await apiFetch(`/api/rooms/${id}`, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${t}` },
   });
-  if (!res.ok) throw new Error('Ошибка удаления кабинета');
 }
 
 // News
 export async function fetchNews(): Promise<News[]> {
-  const res = await apiFetch('/api/news');
-  if (!res.ok) throw new Error('Ошибка загрузки новостей');
-  return res.json();
+  return apiGetList<News>('/api/news');
 }
 
 export async function createNews(
@@ -239,24 +287,22 @@ export async function createNews(
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${t}` },
     body: JSON.stringify(data),
   });
-  if (!res.ok) throw new Error('Ошибка создания новости');
-  return res.json();
+  return res.json().catch(() => {
+    throw new Error('Ошибка создания новости');
+  });
 }
 
 export async function deleteNews(id: number, token?: string): Promise<void> {
   const t = token ?? getStoredToken();
-  const res = await apiFetch(`/api/news/${id}`, {
+  await apiFetch(`/api/news/${id}`, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${t}` },
   });
-  if (!res.ok) throw new Error('Ошибка удаления новости');
 }
 
 // Media
 export async function fetchMedia(): Promise<Media[]> {
-  const res = await apiFetch('/api/media');
-  if (!res.ok) throw new Error('Ошибка загрузки медиа');
-  return res.json();
+  return apiGetList<Media>('/api/media');
 }
 
 export async function uploadMedia(file: File, name?: string | null, token?: string): Promise<Media> {
@@ -269,17 +315,17 @@ export async function uploadMedia(file: File, name?: string | null, token?: stri
     headers: { Authorization: `Bearer ${t}` },
     body: formData,
   });
-  if (!res.ok) throw new Error('Ошибка загрузки файла');
-  return res.json();
+  return res.json().catch(() => {
+    throw new Error('Ошибка загрузки файла');
+  });
 }
 
 export async function deleteMedia(id: number, token?: string): Promise<void> {
   const t = token ?? getStoredToken();
-  const res = await apiFetch(`/api/media/${id}`, {
+  await apiFetch(`/api/media/${id}`, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${t}` },
   });
-  if (!res.ok) throw new Error('Ошибка удаления медиа');
 }
 
 // Schedule
@@ -294,9 +340,7 @@ export async function fetchSchedule(params?: {
   if (params?.room_id) query.append('room_id', params.room_id.toString());
   if (params?.teacher_id) query.append('teacher_id', params.teacher_id.toString());
   if (params?.day_of_week !== undefined) query.append('day_of_week', params.day_of_week.toString());
-  const res = await apiFetch(`/api/schedule${query.toString() ? '?' + query : ''}`);
-  if (!res.ok) throw new Error('Ошибка загрузки расписания');
-  return res.json();
+  return apiGetList<ScheduleItem>(`/api/schedule${query.toString() ? '?' + query : ''}`);
 }
 
 export async function createScheduleItem(data: Omit<ScheduleItem, 'id' | 'created_at' | 'room' | 'teacher'>, token?: string): Promise<ScheduleItem> {
@@ -306,8 +350,9 @@ export async function createScheduleItem(data: Omit<ScheduleItem, 'id' | 'create
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${t}` },
     body: JSON.stringify(data),
   });
-  if (!res.ok) throw new Error('Ошибка создания записи расписания');
-  return res.json();
+  return res.json().catch(() => {
+    throw new Error('Ошибка создания записи расписания');
+  });
 }
 
 export async function updateScheduleItem(id: number, data: Omit<ScheduleItem, 'id' | 'created_at' | 'room' | 'teacher'>, token?: string): Promise<ScheduleItem> {
@@ -317,17 +362,17 @@ export async function updateScheduleItem(id: number, data: Omit<ScheduleItem, 'i
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${t}` },
     body: JSON.stringify(data),
   });
-  if (!res.ok) throw new Error('Ошибка обновления записи расписания');
-  return res.json();
+  return res.json().catch(() => {
+    throw new Error('Ошибка обновления записи расписания');
+  });
 }
 
 export async function deleteScheduleItem(id: number, token?: string): Promise<void> {
   const t = token ?? getStoredToken();
-  const res = await apiFetch(`/api/schedule/${id}`, {
+  await apiFetch(`/api/schedule/${id}`, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${t}` },
   });
-  if (!res.ok) throw new Error('Ошибка удаления записи расписания');
 }
 
 // Accounts
@@ -336,8 +381,14 @@ export async function fetchAccounts(token?: string): Promise<Account[]> {
   const res = await apiFetch('/api/accounts', {
     headers: { Authorization: `Bearer ${t}` },
   });
-  if (!res.ok) throw new Error('Ошибка загрузки аккаунтов');
-  return res.json();
+  const data = await res.json().catch(() => {
+    throw new Error('Некорректный ответ сервера');
+  });
+  if (Array.isArray(data)) return data as Account[];
+  if (data != null && typeof data === 'object' && 'data' in data && Array.isArray((data as { data: unknown }).data)) {
+    return (data as { data: Account[] }).data;
+  }
+  return [];
 }
 
 export async function createAccount(data: { username: string; password: string }, token?: string): Promise<Account> {
@@ -347,17 +398,17 @@ export async function createAccount(data: { username: string; password: string }
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${t}` },
     body: JSON.stringify(data),
   });
-  if (!res.ok) throw new Error('Ошибка создания аккаунта');
-  return res.json();
+  return res.json().catch(() => {
+    throw new Error('Ошибка создания аккаунта');
+  });
 }
 
 export async function deleteAccount(id: number, token?: string): Promise<void> {
   const t = token ?? getStoredToken();
-  const res = await apiFetch(`/api/accounts/${id}`, {
+  await apiFetch(`/api/accounts/${id}`, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${t}` },
   });
-  if (!res.ok) throw new Error('Ошибка удаления аккаунта');
 }
 // ─── Алиасы для совместимости со страницами ───────────────────────────────────
 
@@ -380,8 +431,9 @@ export async function updateAccount(
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${t}` },
     body: JSON.stringify(data),
   });
-  if (!res.ok) throw new Error('Ошибка обновления аккаунта');
-  return res.json();
+  return res.json().catch(() => {
+    throw new Error('Ошибка обновления аккаунта');
+  });
 }
 
 // ─── База данных: экспорт / восстановление ─────────────────────────────────────
@@ -455,6 +507,17 @@ export function getDayName(dayOfWeek: number): string {
   return days[dayOfWeek] ?? '';
 }
 
+/** Парсит дату из API (YYYY-MM-DD или YYYY-MM-DD HH:MM:SS) как локальную полночь. */
+export function parseDateOnly(dateStr: string | null | undefined): Date | null {
+  if (!dateStr || typeof dateStr !== 'string') return null;
+  const part = dateStr.trim().slice(0, 10);
+  const [y, m, d] = part.split('-').map(Number);
+  if (y == null || m == null || d == null || isNaN(y) || isNaN(m) || isNaN(d)) return null;
+  const date = new Date(y, m - 1, d);
+  if (isNaN(date.getTime())) return null;
+  return date;
+}
+
 export function getCurrentWeekType(): 'odd' | 'even' {
   const now = new Date();
   const year = now.getFullYear();
@@ -511,31 +574,24 @@ export interface NotificationsResponse {
 }
 
 export async function getSystemMetrics(): Promise<SystemMetricsResponse> {
-  const res = await apiFetch('/api/dashboard/system-metrics');
-  if (!res.ok) throw new Error('Ошибка загрузки системных метрик');
-  return res.json();
+  return apiGetJson<SystemMetricsResponse>('/api/dashboard/system-metrics');
 }
 
 export async function getFreeRooms(): Promise<FreeRoomsResponse> {
-  const res = await apiFetch('/api/dashboard/free-rooms');
-  if (!res.ok) throw new Error('Ошибка загрузки свободных кабинетов');
-  return res.json();
+  return apiGetJson<FreeRoomsResponse>('/api/dashboard/free-rooms');
 }
 
 export async function getMetricsHistory(days: number = 7): Promise<MetricsHistoryResponse> {
-  const res = await apiFetch(`/api/dashboard/metrics/history?days=${days}`);
-  if (!res.ok) throw new Error('Ошибка загрузки истории метрик');
-  return res.json();
+  return apiGetJson<MetricsHistoryResponse>(`/api/dashboard/metrics/history?days=${days}`);
 }
 
 export async function getNotifications(limit: number = 50): Promise<NotificationsResponse> {
-  const res = await apiFetch(`/api/dashboard/notifications?limit=${limit}`);
-  if (!res.ok) throw new Error('Ошибка загрузки уведомлений');
-  return res.json();
+  return apiGetJson<NotificationsResponse>(`/api/dashboard/notifications?limit=${limit}`);
 }
 
 export async function markNotificationAsRead(id: number): Promise<Notification> {
   const res = await apiFetch(`/api/dashboard/notifications/${id}/read`, { method: 'PATCH' });
-  if (!res.ok) throw new Error('Ошибка обновления уведомления');
-  return res.json();
+  return res.json().catch(() => {
+    throw new Error('Ошибка обновления уведомления');
+  });
 }

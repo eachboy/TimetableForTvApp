@@ -1,4 +1,22 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+
+/** Проверка, что приложение запущено в Tauri (локальная БД, без HTTP-бэкенда). */
+export function isTauri(): boolean {
+  if (typeof window === 'undefined') return false;
+  const w = window as unknown as { __TAURI_INTERNALS__?: unknown; __TAURI__?: unknown };
+  return !!(w.__TAURI_INTERNALS__ ?? w.__TAURI__);
+}
+
+/** Парсит дату из строки "YYYY-MM-DD" или "YYYY-MM-DD HH:MM:SS" в локальную полночь. */
+export function parseDateOnly(dateStr: string | null | undefined): Date | null {
+  if (!dateStr || typeof dateStr !== 'string') return null;
+  const part = dateStr.trim().slice(0, 10);
+  const [y, m, d] = part.split('-').map(Number);
+  if (y == null || m == null || d == null || isNaN(y) || isNaN(m) || isNaN(d)) return null;
+  const date = new Date(y, m - 1, d);
+  if (isNaN(date.getTime())) return null;
+  return date;
+}
 
 export interface Media {
   id: number;
@@ -49,6 +67,11 @@ export interface Room {
 }
 
 export async function fetchMedia(): Promise<Media[]> {
+  if (isTauri()) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const list = await invoke<Media[]>('api_get_media', { skip: 0, limit: 100 });
+    return list ?? [];
+  }
   const response = await fetch(`${API_URL}/api/media`);
   if (!response.ok) {
     throw new Error('Ошибка загрузки медиа');
@@ -57,10 +80,24 @@ export async function fetchMedia(): Promise<Media[]> {
 }
 
 export async function fetchMediaFile(mediaId: number): Promise<string> {
+  if (isTauri()) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const { convertFileSrc } = await import('@tauri-apps/api/core');
+    const path = await invoke<string | null>('api_get_media_file_path', { mediaId });
+    if (!path) {
+      throw new Error('Медиа файл не найден');
+    }
+    return convertFileSrc(path);
+  }
   return `${API_URL}/api/media/${mediaId}/file`;
 }
 
 export async function fetchUpcomingSchedule(): Promise<ScheduleItem[]> {
+  if (isTauri()) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const list = await invoke<ScheduleItem[]>('api_get_schedule_upcoming', { limit: 20 });
+    return list ?? [];
+  }
   const response = await fetch(`${API_URL}/api/schedule/upcoming`);
   if (!response.ok) {
     throw new Error('Ошибка загрузки расписания');
@@ -69,6 +106,11 @@ export async function fetchUpcomingSchedule(): Promise<ScheduleItem[]> {
 }
 
 export async function fetchNews(limit: number = 10): Promise<News[]> {
+  if (isTauri()) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const list = await invoke<News[]>('api_get_news', { skip: 0, limit });
+    return list ?? [];
+  }
   const response = await fetch(`${API_URL}/api/news?limit=${limit}`);
   if (!response.ok) {
     throw new Error('Ошибка загрузки новостей');
@@ -77,6 +119,11 @@ export async function fetchNews(limit: number = 10): Promise<News[]> {
 }
 
 export async function fetchRooms(): Promise<Room[]> {
+  if (isTauri()) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const list = await invoke<Room[]>('api_get_rooms', { skip: 0, limit: 100 });
+    return list ?? [];
+  }
   const response = await fetch(`${API_URL}/api/rooms`);
   if (!response.ok) {
     throw new Error('Ошибка загрузки кабинетов');
@@ -90,6 +137,17 @@ export async function fetchSchedule(params?: {
   teacher_id?: number;
   day_of_week?: number;
 }): Promise<ScheduleItem[]> {
+  if (isTauri()) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const list = await invoke<ScheduleItem[]>('api_get_schedule', {
+      room_id: params?.room_id,
+      teacher_id: params?.teacher_id,
+      day_of_week: params?.day_of_week,
+      skip: 0,
+      limit: 1000,
+    });
+    return list ?? [];
+  }
   const queryParams = new URLSearchParams();
   if (params?.week) queryParams.append('week', params.week.toString());
   if (params?.room_id) queryParams.append('room_id', params.room_id.toString());

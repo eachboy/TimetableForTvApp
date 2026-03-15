@@ -8,7 +8,7 @@ import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { exportDatabase, restoreDatabase } from "@/lib/api"
-import { IconDatabaseBackup, IconUpload } from "@tabler/icons-react"
+import { IconDatabase, IconUpload } from "@tabler/icons-react"
 
 export default function DatabasePage() {
   const [exporting, setExporting] = React.useState(false)
@@ -76,7 +76,7 @@ export default function DatabasePage() {
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
-                  <IconDatabaseBackup className="size-5" />
+                  <IconDatabase className="size-5" />
                   Скачать резервную копию
                 </CardTitle>
                 <CardDescription>

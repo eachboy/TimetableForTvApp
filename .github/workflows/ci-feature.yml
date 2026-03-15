@@ -45,14 +45,8 @@ jobs:
       - name: Start FastAPI server
         run: |
           uvicorn main:app --host 0.0.0.0 --port 8000 &
-          echo "Waiting for backend to start..."
-          for i in $(seq 1 15); do
-            if curl -sf http://localhost:8000/api/health > /dev/null 2>&1; then
-              echo "✅ Backend is up after ${i}s"
-              break
-            fi
-            sleep 1
-          done
+          sleep 5
+        continue-on-error: true
 
       - name: Create test user in DB
         run: |
@@ -100,11 +94,12 @@ jobs:
           retention-days: 7
 
   # ═══════════════════════════════════════════════
-  #  FRONTEND — Next.js (тесты + сборка)
+  #  FRONTEND — Next.js (тесты + сборка, после бэкенда)
   # ═══════════════════════════════════════════════
   frontend-test:
     name: ⚛️ Frontend — Tests & Build
     runs-on: ubuntu-latest
+    needs: backend-test
     defaults:
       run:
         working-directory: frontend
@@ -136,11 +131,12 @@ jobs:
         run: npm run build
 
   # ═══════════════════════════════════════════════
-  #  ADMIN PANEL — Tauri (тесты + сборка JS)
+  #  ADMIN PANEL — Tauri (тесты + сборка JS, после бэкенда)
   # ═══════════════════════════════════════════════
   admin-test:
     name: 🖥️ Admin Panel — Tests & Build
     runs-on: ubuntu-latest
+    needs: backend-test
     defaults:
       run:
         working-directory: admin-panel

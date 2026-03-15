@@ -13,6 +13,7 @@ import {
   IconSettings,
   IconUsers,
   IconRefresh,
+  IconDatabaseExport,
 } from "@tabler/icons-react"
 
 import { NavDocuments } from "@/components/sidebar/nav-documents"
@@ -80,6 +81,11 @@ const data = {
       name: "Управление новостями",
       url: "/news",
       icon: IconReport,
+    },
+    {
+      name: "База данных",
+      url: "/database",
+      icon: IconDatabaseExport,
     },
     {
       name: "Обновления",

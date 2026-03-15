@@ -384,6 +384,37 @@ export async function updateAccount(
   return res.json();
 }
 
+// ─── База данных: экспорт / восстановление ─────────────────────────────────────
+
+/** Скачать резервную копию БД (файл timetable_backup.db). */
+export async function exportDatabase(token?: string): Promise<Blob> {
+  const t = token ?? getStoredToken();
+  const baseUrl = await getApiUrl();
+  const res = await fetch(`${baseUrl}/api/database/export`, {
+    headers: { Authorization: `Bearer ${t}` },
+  });
+  if (!res.ok) throw new Error('Ошибка скачивания резервной копии');
+  return res.blob();
+}
+
+/** Загрузить и применить резервную копию БД (файл .db). */
+export async function restoreDatabase(file: File, token?: string): Promise<{ detail: string }> {
+  const t = token ?? getStoredToken();
+  const baseUrl = await getApiUrl();
+  const form = new FormData();
+  form.append('file', file);
+  const res = await fetch(`${baseUrl}/api/database/restore`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${t}` },
+    body: form,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? 'Ошибка восстановления базы данных');
+  }
+  return res.json();
+}
+
 // Перегрузки createTeacher/createRoom/deleteTeacher/deleteRoom/deleteAccount без токена
 // (страницы вызывают их без токена — берём из localStorage)
 import { getAuthToken } from '@/lib/auth';

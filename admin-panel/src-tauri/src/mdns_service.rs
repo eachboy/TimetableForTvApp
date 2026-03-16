@@ -1,7 +1,10 @@
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 
 const SERVICE_TYPE: &str = "_timetable-update._tcp.local.";
-const SERVICE_INSTANCE: &str = "timetable-admin";
+// Имя инстанса mDNS должно быть <= 15 байт.
+// "timetable-admin" гранично длинное и даёт warning в mdns_sd::service_daemon.
+// Укоротим до "tt-admin", чтобы убрать ошибку длины имени.
+const SERVICE_INSTANCE: &str = "tt-admin";
 
 pub struct MdnsService {
     // Держим daemon живым — при дропе сервис снимается

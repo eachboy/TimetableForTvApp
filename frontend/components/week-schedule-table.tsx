@@ -1,6 +1,6 @@
 'use client';
 
-import { Room, ScheduleItem, getClassTime, getWeekDates, getWeekTypeFromDate } from '@/lib/api'
+import { Room, ScheduleItem, getClassTime, getWeekDates, getWeekTypeFromDate, parseDateOnly } from '@/lib/api'
 
 interface WeekScheduleTableProps {
   rooms: Room[];
@@ -47,20 +47,25 @@ export function WeekScheduleTable({ rooms, scheduleItems, currentWeek, onWeekCha
   
   // Заполняем карту расписания
   scheduleItems.forEach(item => {
-    const itemStartDate = new Date(item.start_date);
-    itemStartDate.setHours(0, 0, 0, 0);
-    const itemEndDate = new Date(item.end_date);
-    itemEndDate.setHours(23, 59, 59, 999);
-    
+    const itemStartDate = parseDateOnly(item.start_date);
+    const itemEndDate = parseDateOnly(item.end_date);
+
+    if (!itemStartDate || !itemEndDate) {
+      return;
+    }
+
     // Фильтруем по выбранному кабинету
     if (selectedRoom && item.room_id !== selectedRoom.id) {
       return;
     }
-    
+
     // Проверяем, попадает ли неделя в диапазон дат расписания
     if (itemStartDate <= weekEnd && itemEndDate >= weekStart) {
-      // Проверяем, подходит ли тип недели (четная/нечетная/обе)
-      if (item.week_type === 'both' || item.week_type === currentWeekType) {
+      // Нормализуем тип недели (может приходить в разных регистрах или быть пустым)
+      const wt = (item.week_type ?? '').toLowerCase();
+      const weekMatches = wt === 'both' || wt === currentWeekType;
+
+      if (weekMatches) {
         if (scheduleMap[item.day_of_week] && scheduleMap[item.day_of_week][item.class_number]) {
           scheduleMap[item.day_of_week][item.class_number].push(item);
         }
@@ -122,12 +127,12 @@ export function WeekScheduleTable({ rooms, scheduleItems, currentWeek, onWeekCha
                             {items.map(item => (
                               <div
                                 key={item.id}
-                                className="h-full bg-blue-50 rounded p-3 text-sm flex flex-col justify-center"
+                                className="h-full text-sm flex flex-col justify-center"
                               >
-                                <div className="font-semibold text-gray-900 mb-1 line-clamp-2 leading-tight">{item.subject}</div>
+                                <div className="font-semibold text-gray-900 mb-1 line-clamp-3 leading-tight">{item.subject}</div>
                                 
                                 {item.teacher && (
-                                  <div className="text-gray-500 text-xs line-clamp-1">{item.teacher.name}</div>
+                                  <div className="text-gray-500 text-xs line-clamp-2 pb-2">{item.teacher.name}</div>
                                 )}
                                 <div className="text-gray-600 mb-1 text-xs line-clamp-1">{item.groups}</div>
                               </div>

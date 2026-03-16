@@ -1,7 +1,7 @@
 //! HTTP API на 127.0.0.1:8000 — полный аналог Python-бэкенда для admin panel.
 
 use axum::{
-    extract::{Multipart, Path, Query, State},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -117,6 +117,9 @@ pub fn create_app(media_dir: PathBuf) -> Router<()> {
         .route("/api/dashboard/notifications/:id/read", patch(mark_notification_read))
         .route("/api/database/export", get(database_export))
         .route("/api/database/restore", post(database_restore))
+        // Разрешаем загрузку крупных медиафайлов (видео) через multipart.
+        // По умолчанию лимит тела запроса слишком мал для видео.
+        .layer(DefaultBodyLimit::max(500 * 1024 * 1024))
         .layer(middleware::from_fn(cors_middleware))
         .with_state(state)
 }
@@ -416,7 +419,7 @@ async fn get_media_file(Path(id): Path<i64>) -> Result<Response, ApiError> {
     if !path.exists() {
         return Err(ApiError::NotFound("Файл не найден".into()));
     }
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_string();
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
     let path_clone = path.clone();
     let data = tokio::task::spawn_blocking(move || std::fs::read(&path_clone))
         .await
@@ -430,6 +433,10 @@ async fn get_media_file(Path(id): Path<i64>) -> Result<Response, ApiError> {
         "svg" => "image/svg+xml",
         "mp4" => "video/mp4",
         "webm" => "video/webm",
+        "avi" => "video/x-msvideo",
+        "mov" => "video/quicktime",
+        "wmv" => "video/x-ms-wmv",
+        "flv" => "video/x-flv",
         _ => "application/octet-stream",
     };
     Ok((

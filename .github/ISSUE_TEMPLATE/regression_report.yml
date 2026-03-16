@@ -1,0 +1,54 @@
+name: Regression report
+description: Report behavior that used to work and now fails
+title: "[Regression]: "
+labels:
+  - bug
+  - regression
+body:
+  - type: dropdown
+    id: app
+    attributes:
+      label: Affected app
+      options:
+        - frontend
+        - admin-panel
+        - frontend/src-tauri
+        - admin-panel/src-tauri
+        - ci/cd
+    validations:
+      required: true
+
+  - type: input
+    id: last_known_good
+    attributes:
+      label: Last known good version/commit
+      placeholder: "e.g. v1.1.9 or commit SHA"
+    validations:
+      required: true
+
+  - type: input
+    id: first_bad
+    attributes:
+      label: First known bad version/commit
+      placeholder: "e.g. v1.2.0 or commit SHA"
+
+  - type: textarea
+    id: behavior_change
+    attributes:
+      label: What changed?
+      description: Describe old behavior vs current behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      render: shell

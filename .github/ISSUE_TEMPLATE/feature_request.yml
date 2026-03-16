@@ -1,0 +1,45 @@
+name: Feature request
+description: Suggest an enhancement
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Target area
+      options:
+        - frontend
+        - admin-panel
+        - frontend/src-tauri
+        - admin-panel/src-tauri
+        - ci/cd
+        - docs
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What pain point are you trying to solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Expected impact
+      description: Performance, UX, maintainability, release process, etc.

@@ -79,7 +79,7 @@ export function ScheduleAppBar({ rooms, selectedRoom, onRoomChange, currentWeek:
             <div className="text-xl font-bold text-gray-900">{displayWeek}</div>
           </div>
           <div className="text-right">
-            <div className="text-sm text-gray-600">Тип недели</div>
+            <div className="text-sm text-gray-600 w-23">Тип недели</div>
             <div className="text-xl font-bold text-gray-900">{weekType}</div>
           </div>
         </div>

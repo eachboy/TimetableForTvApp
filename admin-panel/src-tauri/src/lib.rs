@@ -3,8 +3,11 @@ mod mdns_service;
 mod github;
 
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Manager};
-use update_server::UpdateServer;
+use std::thread;
+use std::path::PathBuf;
+use tauri::{AppHandle, Manager, WindowEvent};
+use tokio::runtime::Runtime;
+use update_server::{UpdateServer, write_weather_json};
 use mdns_service::MdnsService;
 
 // ─── Глобальное состояние ─────────────────────────────────────────────────────
@@ -12,6 +15,54 @@ use mdns_service::MdnsService;
 pub struct AppState {
     pub update_server: Arc<Mutex<Option<UpdateServer>>>,
     pub mdns: Arc<Mutex<Option<MdnsService>>>,
+}
+
+// ─── Работа с weather.json в src-tauri ──────────────────────────────────────────
+
+fn src_tauri_dir() -> Option<PathBuf> {
+    // В dev-режиме current_dir обычно уже указывает на `src-tauri`.
+    // Чтобы не получить путь вида `src-tauri/src-tauri`, проверяем это.
+    std::env::current_dir().ok().map(|dir| {
+        if dir.ends_with("src-tauri") {
+            dir
+        } else {
+            dir.join("src-tauri")
+        }
+    })
+}
+
+// В release-сборках пишем weather.json в src-tauri, чтобы был бандл по умолчанию.
+#[cfg(not(debug_assertions))]
+fn spawn_update_weather_in_src_tauri() {
+    let Some(dir) = src_tauri_dir() else {
+        log::warn!("Cannot determine src-tauri directory for weather.json");
+        return;
+    };
+
+    thread::spawn(move || {
+        if let Ok(rt) = Runtime::new() {
+            if let Err(e) = rt.block_on(write_weather_json(dir.clone())) {
+                log::warn!(
+                    "Failed to write weather.json in src-tauri at {}: {}",
+                    dir.display(),
+                    e
+                );
+            } else {
+                log::info!(
+                    "weather.json successfully written in src-tauri at {}",
+                    dir.display()
+                );
+            }
+        } else {
+            log::warn!("Tokio runtime for src-tauri weather.json not created");
+        }
+    });
+}
+
+// В dev-режиме не трогаем файл в src-tauri, чтобы не было бесконечных ребилдов.
+#[cfg(debug_assertions)]
+fn spawn_update_weather_in_src_tauri() {
+    log::info!("Skipping weather.json write in src-tauri in debug mode");
 }
 
 // ─── Точка входа ──────────────────────────────────────────────────────────────
@@ -32,6 +83,9 @@ pub fn run() {
                 )?;
             }
 
+            // При старте приложения всегда обновляем/создаём weather.json в src-tauri
+            spawn_update_weather_in_src_tauri();
+
             // Запускаем update-сервер + mDNS в фоне
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -50,6 +104,12 @@ pub fn run() {
             cmd_get_cached_version,
             cmd_get_app_version,
         ])
+        .on_window_event(|_window, event| {
+            if let WindowEvent::CloseRequested { .. } = event {
+                // Перед закрытием окна ещё раз сохраняем weather.json в src-tauri
+                spawn_update_weather_in_src_tauri();
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

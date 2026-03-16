@@ -1,0 +1,68 @@
+name-template: "v$RESOLVED_VERSION"
+tag-template: "v$RESOLVED_VERSION"
+template: |
+  ## Changes
+
+  $CHANGES
+
+  ## Contributors
+
+  $CONTRIBUTORS
+
+categories:
+  - title: "Features"
+    labels:
+      - "feature"
+      - "enhancement"
+  - title: "Fixes"
+    labels:
+      - "fix"
+      - "bug"
+      - "regression"
+  - title: "CI/CD"
+    labels:
+      - "ci"
+      - "ci/cd"
+  - title: "Dependencies"
+    labels:
+      - "dependencies"
+  - title: "Maintenance"
+    labels:
+      - "chore"
+      - "refactor"
+
+change-template: "- $TITLE (#$NUMBER) @$AUTHOR"
+change-title-escapes: '\<*_&'
+no-changes-template: "- No user-facing changes in this cycle."
+
+version-resolver:
+  major:
+    labels:
+      - "major"
+      - "breaking-change"
+  minor:
+    labels:
+      - "feature"
+      - "enhancement"
+  patch:
+    labels:
+      - "fix"
+      - "bug"
+      - "dependencies"
+      - "chore"
+      - "ci/cd"
+  default: patch
+
+exclude-labels:
+  - "skip-changelog"
+
+autolabeler:
+  - label: "frontend"
+    files:
+      - "frontend/**"
+  - label: "admin-panel"
+    files:
+      - "admin-panel/**"
+  - label: "ci/cd"
+    files:
+      - ".github/**"

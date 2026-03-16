@@ -8,6 +8,122 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use tiny_http::{Header, Response, Server};
+use tokio::fs as async_fs;
+use tokio::runtime::Runtime;
+use chrono::{Datelike, Local};
+
+const WEATHER_TTL_SECS: u64 = 20 * 60;
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct WeatherData {
+    pub temperature: f64,
+    pub temp_min: Option<f64>,
+    pub temp_max: Option<f64>,
+    pub description: Option<String>,
+    pub condition: Option<String>,
+    pub date: Option<String>, // YYYY-MM-DD
+}
+
+async fn fetch_external_weather() -> Result<WeatherData, String> {
+    // Берём погоду из Open‑Meteo с явными daily min/max, текущей температурой и кодом погоды.
+    // Пример: https://api.open-meteo.com/v1/forecast?latitude=52.52&longitude=13.41&daily=temperature_2m_max,temperature_2m_min&hourly=temperature_2m&current=temperature_2m,weather_code
+    let url = "https://api.open-meteo.com/v1/forecast?latitude=52.52&longitude=13.41&daily=temperature_2m_max,temperature_2m_min&hourly=temperature_2m&current=temperature_2m,weather_code";
+
+    let resp = reqwest::get(url)
+        .await
+        .map_err(|e| format!("weather request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("weather HTTP status {}", resp.status()));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("weather json parse error: {}", e))?;
+
+    // current.temperature_2m — текущая температура
+    let temp = json["current"]["temperature_2m"]
+        .as_f64()
+        .ok_or_else(|| "no temp".to_string())?;
+
+    // daily.temperature_2m_min/max[0] — минимум/максимум на сегодня
+    let temp_min = json["daily"]["temperature_2m_min"]
+        .get(0)
+        .and_then(|v| v.as_f64());
+    let temp_max = json["daily"]["temperature_2m_max"]
+        .get(0)
+        .and_then(|v| v.as_f64());
+
+    // Код погоды Open‑Meteo: маппим в человекочитаемое описание и condition
+    // для фронта (`clear`, `clouds`, `rain`, `snow`, ...).
+    let weather_code = json["current"]["weather_code"].as_i64();
+
+    let (description, condition) = if let Some(code) = weather_code {
+        match code {
+            0 => ("Ясно", "clear"),
+            1 | 2 | 3 => ("Переменная облачность", "clouds"),
+            45 | 48 => ("Туман", "fog"),
+            51 | 53 | 55 | 56 | 57 => ("Морось", "drizzle"),
+            61 | 63 | 65 | 66 | 67 | 80 | 81 | 82 => ("Дождь", "rain"),
+            71 | 73 | 75 | 77 | 85 | 86 => ("Снег", "snow"),
+            95 | 96 | 99 => ("Гроза", "thunderstorm"),
+            _ => ("Погода", "unknown"),
+        }
+    } else {
+        ("Погода", "unknown")
+    };
+
+    let description = Some(description.to_string());
+    let condition = Some(condition.to_string());
+
+    // Дата — daily.time[0] (YYYY‑MM‑DD). Если по какой‑то причине её нет,
+    // подстраховываемся локальной датой.
+    let date_from_api = json["daily"]["time"]
+        .get(0)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let date = date_from_api.or_else(|| {
+        let now = Local::now();
+        Some(format!("{:04}-{:02}-{:02}", now.year(), now.month(), now.day()))
+    });
+
+    Ok(WeatherData {
+        temperature: temp,
+        temp_min,
+        temp_max,
+        description,
+        condition,
+        date,
+    })
+}
+
+pub async fn write_weather_json(output_dir: PathBuf) -> Result<(), String> {
+    // output_dir — та же директория, куда сейчас пишется latest.json
+    let weather = match fetch_external_weather().await {
+        Ok(w) => w,
+        Err(e) => {
+            log::warn!("Cannot fetch external weather: {}", e);
+            return Err(e);
+        }
+    };
+
+    let path = output_dir.join("weather.json");
+    let data = serde_json::to_vec_pretty(&weather)
+        .map_err(|e| format!("weather json serialize error: {}", e))?;
+
+    async_fs::create_dir_all(&output_dir)
+        .await
+        .map_err(|e| format!("mkdir {:?} failed: {}", output_dir, e))?;
+
+    async_fs::write(&path, &data)
+        .await
+        .map_err(|e| format!("write {:?} failed: {}", path, e))?;
+
+    log::info!("weather.json written to {}", path.display());
+    Ok(())
+}
 
 /// Информация о текущей раздаваемой версии
 #[derive(Clone, Default)]
@@ -34,6 +150,31 @@ impl UpdateServer {
         let cached = Arc::new(Mutex::new(CachedVersion::default()));
         let cached_clone = Arc::clone(&cached);
         let cache_dir_clone = cache_dir.clone();
+
+        // При старте сразу пытаемся подготовить weather.json, если его ещё нет.
+        // Делаем это в отдельном системном потоке, чтобы не создавать Tokio runtime
+        // внутри уже работающего runtime (иначе получаем панику).
+        {
+            let cache_dir_clone_for_weather = cache_dir.clone();
+            thread::spawn(move || {
+                let weather_path = cache_dir_clone_for_weather.join("weather.json");
+                if weather_path.exists() {
+                    return;
+                }
+                log::info!(
+                    "weather.json not found at startup, trying to generate it in background..."
+                );
+                if let Ok(rt) = Runtime::new() {
+                    if let Err(e) =
+                        rt.block_on(write_weather_json(cache_dir_clone_for_weather.clone()))
+                    {
+                        log::warn!("Initial weather.json generation failed: {}", e);
+                    }
+                } else {
+                    log::warn!("Tokio runtime for initial weather.json not created");
+                }
+            });
+        }
 
         // Пробуем загрузить уже существующую latest.json при старте
         {
@@ -130,6 +271,15 @@ impl UpdateServer {
         fs::write(&latest_path, serde_json::to_string_pretty(&latest).unwrap())
             .map_err(|e| format!("Cannot write latest.json: {}", e))?;
 
+        // Пытаемся обновить weather.json рядом с latest.json
+        if let Ok(rt) = Runtime::new() {
+            if let Err(e) = rt.block_on(write_weather_json(self.cache_dir.clone())) {
+                log::warn!("weather.json not updated: {}", e);
+            }
+        } else {
+            log::warn!("Tokio runtime for weather.json not created");
+        }
+
         // Обновляем состояние в памяти
         let mut cached = self.cached.lock().unwrap();
         cached.version = Some(version.to_string());
@@ -166,6 +316,10 @@ impl UpdateServer {
 
         if path == "/latest.json" || path.starts_with("/update/") {
             Self::serve_latest_json(cache_dir)
+        } else if path == "/weather.json" {
+            Self::ensure_fresh_weather(cache_dir);
+            let path = cache_dir.join("weather.json");
+            Self::serve_file(&path)
         } else if let Some(filename) = path.strip_prefix("/download/") {
             // Безопасность: только имя файла, без ../ и т.д.
             let safe_name = Path::new(filename)
@@ -186,6 +340,40 @@ impl UpdateServer {
     fn serve_latest_json(cache_dir: &Path) -> Response<BufReader<fs::File>> {
         let path = cache_dir.join("latest.json");
         Self::serve_file(&path)
+    }
+
+    fn ensure_fresh_weather(cache_dir: &Path) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let path = cache_dir.join("weather.json");
+
+        let needs_refresh = match fs::metadata(&path) {
+            Ok(meta) => {
+                if let Ok(modified) = meta.modified() {
+                    if let Ok(age) = SystemTime::now().duration_since(modified) {
+                        age.as_secs() >= WEATHER_TTL_SECS
+                    } else {
+                        true
+                    }
+                } else {
+                    true
+                }
+            }
+            Err(_) => true,
+        };
+
+        if !needs_refresh {
+            return;
+        }
+
+        log::info!("Refreshing weather.json in {:?}", cache_dir);
+        if let Ok(rt) = Runtime::new() {
+            if let Err(e) = rt.block_on(write_weather_json(cache_dir.to_path_buf())) {
+                log::warn!("Failed to refresh weather.json: {}", e);
+            }
+        } else {
+            log::warn!("Tokio runtime for weather.json not created (on /weather.json request)");
+        }
     }
 
     fn serve_file(path: &Path) -> Response<BufReader<fs::File>> {

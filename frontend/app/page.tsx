@@ -2,11 +2,12 @@
 
 import { CurrentTime } from '@/components/current-time';
 import { MediaPlayer } from '@/components/media-player';
+import { Theather } from '@/components/theather';
 import { NewsTicker } from '@/components/news-ticker';
 import { ScheduleSidebar } from '@/components/schedule-sidebar';
 import {
   fetchMedia, fetchNews, fetchRooms, fetchSchedule,
-  getClassTime, getCurrentWeekNumber, isTauri, parseDateOnly,
+  getClassTime, getWeekTypeFromDate, isTauri, parseDateOnly,
   Media, News, Room, ScheduleItem
 } from '@/lib/api';
 import { useRouter } from 'next/navigation';
@@ -19,7 +20,6 @@ interface RoomWithSchedule {
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 
-/** Ждёт, пока бэкенд ответит на /api/health (только когда не в Tauri). Максимум timeoutMs мс. */
 async function waitForBackend(timeoutMs = 30_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -46,26 +46,11 @@ export default function Home() {
   const [backendStatus, setBackendStatus] = useState<'waiting' | 'ready' | 'timeout'>('waiting');
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Навигация стрелками: Left/Right — переключение медиа, Up/Down — переход к расписанию
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'ArrowLeft') {
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         e.preventDefault();
-        if (mediaList.length > 1) {
-          setCurrentMediaIndex((prev) => (prev === 0 ? mediaList.length - 1 : prev - 1));
-        }
-        return;
-      }
-      if (e.key === 'ArrowRight') {
-        e.preventDefault();
-        if (mediaList.length > 1) {
-          setCurrentMediaIndex((prev) => (prev + 1) % mediaList.length);
-        }
-        return;
-      }
-      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
-        e.preventDefault();
-        router.push('/schedule');
+        router.push('/shedule');
       }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -104,49 +89,79 @@ export default function Home() {
 
       const today = new Date();
       today.setHours(0, 0, 0, 0);
-      // Пн=0 .. Сб=5; в воскресенье показываем понедельник (currentDayOfWeek = -1, все дни подходят)
-      const currentDayOfWeek = today.getDay() === 0 ? -1 : today.getDay() - 1;
-      const currentWeek = getCurrentWeekNumber();
-      const weekType = currentWeek % 2 === 0 ? 'even' : 'odd';
+      const now = new Date();
+      // Пн=0 .. Вс=6 (для согласованного расчёта смещения до следующей пары)
+      const currentDayOfWeek = (today.getDay() + 6) % 7;
 
       const roomsWithTodayClasses: RoomWithSchedule[] = await Promise.all(
         roomsData.map(async (room) => {
           try {
             const scheduleItems = await fetchSchedule({ room_id: room.id }).catch(() => []);
-            const todayItems = scheduleItems
-              .filter(item => {
+            const candidates = scheduleItems
+              .map((item) => {
                 const startDate = parseDateOnly(item.start_date);
                 const endDate = parseDateOnly(item.end_date);
-                if (!startDate || !endDate) return false;
-                const wt = (item.week_type ?? '').toLowerCase();
-                const dayMatch = currentDayOfWeek === -1
-                  ? item.day_of_week === 0
-                  : item.day_of_week === currentDayOfWeek;
-                return (
-                  startDate <= today && endDate >= today &&
-                  dayMatch &&
-                  (wt === 'both' || wt === weekType)
-                );
-              })
-              .sort((a, b) => a.class_number - b.class_number);
+                if (!startDate || !endDate) return null;
 
-            let nearest: ScheduleItem | null = null;
-            if (todayItems.length > 0) {
-              const now = new Date();
-              const itemsWithTimes = todayItems.map(item => {
                 const timeRange = getClassTime(item.class_number);
-                const [startStr, endStr] = timeRange.split('-').map(s => s.trim());
-                const start = new Date(today);
-                const [sh, sm] = startStr.split(':').map(Number);
-                start.setHours(sh || 0, sm || 0, 0, 0);
-                const end = new Date(today);
-                const [eh, em] = endStr.split(':').map(Number);
-                end.setHours(eh || 0, em || 0, 0, 0);
-                return { item, start, end };
-              });
-              const upcoming = itemsWithTimes.find(x => x.end >= now) || null;
-              nearest = upcoming ? upcoming.item : itemsWithTimes[itemsWithTimes.length - 1].item;
-            }
+                const [startStr, endStr] = timeRange.split('-').map((s) => s.trim());
+                if (!startStr || !endStr) return null;
+
+                const itemDay = Number(item.day_of_week);
+                if (!Number.isFinite(itemDay) || itemDay < 0 || itemDay > 6) return null;
+
+                // Смещение до ближайшего наступления дня пары в календаре.
+                let dayOffset = (itemDay - currentDayOfWeek + 7) % 7;
+
+                const buildOccurrence = (offset: number) => {
+                  const date = new Date(today);
+                  date.setDate(date.getDate() + offset);
+
+                  const start = new Date(date);
+                  const [sh, sm] = startStr.split(':').map(Number);
+                  start.setHours(sh || 0, sm || 0, 0, 0);
+
+                  const end = new Date(date);
+                  const [eh, em] = endStr.split(':').map(Number);
+                  end.setHours(eh || 0, em || 0, 0, 0);
+
+                  return { start, end };
+                };
+
+                // Если пара уже закончилась сегодня — рассматриваем следующую неделю.
+                let occurrence = buildOccurrence(dayOffset);
+                if (dayOffset === 0 && occurrence.end <= now) {
+                  dayOffset += 7;
+                  occurrence = buildOccurrence(dayOffset);
+                }
+
+                // Проверяем диапазон дат предмета для найденного наступления.
+                const occurrenceDate = new Date(occurrence.start);
+                occurrenceDate.setHours(0, 0, 0, 0);
+                if (occurrenceDate < startDate || occurrenceDate > endDate) return null;
+
+                const normalizedWeekType = (item.week_type ?? '').toLowerCase();
+                const weekType = getWeekTypeFromDate(occurrenceDate);
+
+                // Если по чётности не подходит текущая неделя для этой даты —
+                // сдвигаем ещё на неделю (чётность сменится).
+                if (normalizedWeekType !== 'both' && normalizedWeekType !== weekType) {
+                  dayOffset += 7;
+                  occurrence = buildOccurrence(dayOffset);
+                  const shiftedDate = new Date(occurrence.start);
+                  shiftedDate.setHours(0, 0, 0, 0);
+                  if (shiftedDate < startDate || shiftedDate > endDate) return null;
+                }
+
+                return {
+                  item,
+                  start: occurrence.start,
+                };
+              })
+              .filter((entry): entry is { item: ScheduleItem; start: Date } => entry !== null)
+              .sort((a, b) => a.start.getTime() - b.start.getTime());
+
+            const nearest = candidates.length > 0 ? candidates[0].item : null;
 
             return { room, todayClasses: nearest ? [nearest] : [] };
           } catch {
@@ -154,7 +169,6 @@ export default function Home() {
           }
         })
       );
-
       setRoomsWithSchedule(roomsWithTodayClasses);
       setNews(newsList);
     } catch (err) {
@@ -260,8 +274,9 @@ export default function Home() {
       <div className="flex-1 flex flex-col px-4 py-4 max-w-[1920px] mx-auto w-full">
 
         {/* Шапка */}
-        <div className="mb-4 flex justify-between items-start flex-shrink-0">
+        <div className="mb-4 flex justify-between align-center shrink-0">
           <h1 className="text-2xl font-bold text-white">интересное</h1>
+          <Theather />
           <CurrentTime />
         </div>
 
@@ -273,7 +288,7 @@ export default function Home() {
             {/* Контейнер с фиксированным соотношением сторон */}
             <div className="relative w-full rounded-lg overflow-hidden" style={{ aspectRatio: '16/9' }}>
               {currentMedia ? (
-                <MediaPlayer media={currentMedia} onNext={handleNextMedia} />
+                <MediaPlayer media={currentMedia} onNext={handleNextMedia} mediaCount={mediaList.length} />
               ) : (
                 <div className="absolute inset-0 flex items-center justify-center">
                   <span className="text-zinc-600 text-lg select-none">нет медиа</span>
@@ -283,10 +298,10 @@ export default function Home() {
           </div>
 
           {/* Разделитель */}
-          <div className="hidden lg:block w-px bg-zinc-800 self-stretch flex-shrink-0" />
+          <div className="hidden lg:block w-px bg-zinc-800 self-stretch shrink-0" />
 
           {/* Правая колонка — расписание */}
-          <div className="w-full lg:w-[402px] flex-shrink-0 items-center">
+          <div className="w-full lg:w-[402px] shrink-0 items-center">
             <ScheduleSidebar roomsWithSchedule={roomsWithSchedule} />
           </div>
 

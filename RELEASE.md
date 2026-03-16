@@ -43,10 +43,10 @@ git push origin main
 **Вариант A: тег по версии (рекомендуется)**
 
 ```bash
-VERSION=1.2.0   # версия из package.json
+VERSION=1.1.0   # версия из package.json
 git tag "v${VERSION}"
 git push origin "v${VERSION}"
-```
+``` 
 
 При push в `main` GitHub Actions (CD) соберёт приложения и создаст GitHub Release с тегом `v<VERSION>` и артефактами (exe, msi, deb, AppImage).
 

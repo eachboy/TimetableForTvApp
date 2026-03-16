@@ -7,22 +7,32 @@ import { fetchMediaFile, Media } from '@/lib/api';
 interface MediaPlayerProps {
   media: Media;
   onNext: () => void;
+  mediaCount: number;
 }
 
-export function MediaPlayer({ media, onNext }: MediaPlayerProps) {
+export function MediaPlayer({ media, onNext, mediaCount }: MediaPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
+  const videoFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const didAdvanceRef = useRef(false);
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const isVideo = media.file_type === 'video';
+  const hasPlaylist = mediaCount > 1;
 
   const videoGlow = useVideoGlow(videoRef);
   const imageGlow = useVideoGlow(imageRef);
   const glowColor = isVideo ? videoGlow : imageGlow;
 
   useEffect(() => {
+    didAdvanceRef.current = false;
+    if (videoFallbackTimerRef.current) {
+      clearTimeout(videoFallbackTimerRef.current);
+      videoFallbackTimerRef.current = null;
+    }
+
     let isMounted = true;
 
     if (videoRef.current) {
@@ -61,7 +71,13 @@ export function MediaPlayer({ media, onNext }: MediaPlayerProps) {
     };
 
     loadMediaUrl();
-    return () => { isMounted = false; };
+    return () => {
+      isMounted = false;
+      if (videoFallbackTimerRef.current) {
+        clearTimeout(videoFallbackTimerRef.current);
+        videoFallbackTimerRef.current = null;
+      }
+    };
   }, [media.id, media.uploaded_at, onNext]);
 
   useEffect(() => {
@@ -102,11 +118,15 @@ export function MediaPlayer({ media, onNext }: MediaPlayerProps) {
   useEffect(() => {
     if (isVideo && videoRef.current) {
       const video = videoRef.current;
-      const handleEnded = () => onNext();
+      const handleEnded = () => {
+        if (!hasPlaylist || didAdvanceRef.current) return;
+        didAdvanceRef.current = true;
+        onNext();
+      };
       video.addEventListener('ended', handleEnded);
       return () => video.removeEventListener('ended', handleEnded);
     }
-  }, [isVideo, onNext]);
+  }, [isVideo, hasPlaylist, onNext]);
 
   useEffect(() => {
     if (!isVideo && mediaUrl && !isLoading) {
@@ -141,7 +161,7 @@ export function MediaPlayer({ media, onNext }: MediaPlayerProps) {
           src={mediaUrl}
           className="w-full h-full object-contain"
           muted
-          loop={false}
+          loop={!hasPlaylist}
           playsInline
           preload="auto"
           crossOrigin="anonymous"
@@ -198,6 +218,22 @@ export function MediaPlayer({ media, onNext }: MediaPlayerProps) {
           onLoadStart={() => setError(null)}
           onLoadedMetadata={() => {
             if (videoRef.current) {
+              if (videoFallbackTimerRef.current) {
+                clearTimeout(videoFallbackTimerRef.current);
+                videoFallbackTimerRef.current = null;
+              }
+
+              // Fallback для редких случаев, когда событие ended не срабатывает.
+              if (hasPlaylist && Number.isFinite(videoRef.current.duration) && videoRef.current.duration > 0) {
+                const timeoutMs = Math.ceil(videoRef.current.duration * 1000) + 300;
+                videoFallbackTimerRef.current = setTimeout(() => {
+                  if (!didAdvanceRef.current) {
+                    didAdvanceRef.current = true;
+                    onNext();
+                  }
+                }, timeoutMs);
+              }
+
               console.log('Метаданные видео загружены:', {
                 mediaId: media.id,
                 duration: videoRef.current.duration,

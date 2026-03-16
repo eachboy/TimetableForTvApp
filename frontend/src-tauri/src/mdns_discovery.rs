@@ -7,16 +7,22 @@ use tokio::time::timeout;
 const SERVICE_TYPE: &str = "_timetable-update._tcp.local.";
 
 pub async fn discover_update_server(timeout_secs: u64) -> Option<String> {
+    // Запускаем блокирующий browse в отдельном потоке и ограничиваем общее время ожидания.
+    let browse_timeout = Duration::from_secs(timeout_secs.max(5)); // не меньше 5 секунд
+
     let result = timeout(
-        Duration::from_secs(timeout_secs),
-        tokio::task::spawn_blocking(move || browse_for_service()),
+        browse_timeout,
+        tokio::task::spawn_blocking(move || browse_for_service(timeout_secs)),
     )
     .await;
 
     match result {
         Ok(Ok(Some(url))) => Some(url),
         Ok(Ok(None)) => {
-            log::debug!("mDNS browse completed, no service found");
+            log::debug!(
+                "mDNS browse completed without resolving any service ({}s window)",
+                timeout_secs
+            );
             None
         }
         Ok(Err(e)) => {
@@ -30,11 +36,17 @@ pub async fn discover_update_server(timeout_secs: u64) -> Option<String> {
     }
 }
 
-fn browse_for_service() -> Option<String> {
+fn browse_for_service(timeout_secs: u64) -> Option<String> {
+    log::info!(
+        "mDNS browse started for {} with timeout {}s",
+        SERVICE_TYPE,
+        timeout_secs
+    );
+
     let daemon = ServiceDaemon::new().ok()?;
     let receiver = daemon.browse(SERVICE_TYPE).ok()?;
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(4);
+    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs.max(5));
 
     loop {
         if std::time::Instant::now() > deadline {
@@ -43,6 +55,12 @@ fn browse_for_service() -> Option<String> {
 
         match receiver.recv_timeout(Duration::from_millis(200)) {
             Ok(ServiceEvent::ServiceResolved(info)) => {
+                log::info!(
+                    "mDNS ServiceResolved: fullname={}, addresses_v4={:?}, port={}",
+                    info.get_fullname(),
+                    info.get_addresses_v4(),
+                    info.get_port()
+                );
                 let ip = info
                     .get_addresses_v4()
                     .into_iter()
@@ -58,9 +76,11 @@ fn browse_for_service() -> Option<String> {
                 return Some(url);
             }
             Ok(ServiceEvent::SearchStarted(_)) => {
-                log::debug!("mDNS search started for {}", SERVICE_TYPE);
+                log::debug!("mDNS SearchStarted event for {}", SERVICE_TYPE);
             }
-            Ok(_) => {}
+            Ok(ev) => {
+                log::debug!("mDNS event: {:?}", ev);
+            }
             Err(_) => {
                 // Таймаут ожидания или временная ошибка — продолжаем цикл
                 std::thread::sleep(Duration::from_millis(100));

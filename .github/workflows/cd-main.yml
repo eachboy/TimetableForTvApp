@@ -60,13 +60,13 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Ensure timetable.db exists for Tauri build
         run: node -e "const fs=require('fs'); const p='src-tauri/timetable.db'; if(!fs.existsSync(p)) fs.writeFileSync(p,'');"
 
       - name: Set up Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "22"
           cache: "npm"
@@ -106,7 +106,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.FRONTEND_TAURI_KEY_PASSWORD }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact-name }}-${{ github.sha }}
           path: ${{ matrix.artifact-path }}
@@ -142,10 +142,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "22"
           cache: "npm"
@@ -185,7 +185,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.ADMIN_TAURI_KEY_PASSWORD }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact-name }}-${{ github.sha }}
           path: ${{ matrix.artifact-path }}
@@ -203,10 +203,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release-assets
 
@@ -237,7 +237,7 @@ jobs:
 
       - name: Get release drafter notes
         id: release_notes
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const targetTag = '${{ steps.version.outputs.tag }}';
@@ -252,7 +252,7 @@ jobs:
             core.setOutput('body', body);
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: ${{ steps.version.outputs.name }}

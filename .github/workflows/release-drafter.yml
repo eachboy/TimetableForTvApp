@@ -18,7 +18,7 @@ jobs:
     steps:
       - name: Check release-drafter config in default branch
         id: config_check
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const owner = context.repo.owner;
@@ -39,6 +39,6 @@ jobs:
 
       - name: Update release draft
         if: steps.config_check.outputs.exists == 'true'
-        uses: release-drafter/release-drafter@v6
+        uses: release-drafter/release-drafter@v7
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

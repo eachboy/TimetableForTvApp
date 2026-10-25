@@ -5,7 +5,7 @@ import { DoomEngine, DoomKeys } from '@/lib/doom-engine';
 import {
   DOOM_EXIT_HOLD_MS,
   mapArrowsToDoom,
-  usePulse,
+  pulseUse,
   type DoomInput,
 } from '@/lib/doom-controls';
 
@@ -89,7 +89,7 @@ export function DoomGame({ onActivity, onBack, onGameOverChange }: Props) {
             apply('left', DoomKeys.LEFT, input.left);
             apply('right', DoomKeys.RIGHT, input.right);
             apply('fire', DoomKeys.FIRE, input.fire);
-            apply('use', DoomKeys.USE, usePulse(ticks));
+            apply('use', DoomKeys.USE, pulseUse(ticks));
             engine.tick();
             ticks++;
           }

@@ -93,7 +93,7 @@ export class DoomEngine {
     ]);
     const wadBytes = new Uint8Array(wad);
     const factory = evalDoomFactory(js);
-    const module = await factory({
+    const doomModule = await factory({
       wasmBinary: wasm,
       print: () => {},
       printErr: () => {},
@@ -104,7 +104,7 @@ export class DoomEngine {
         },
       ],
     });
-    const engine = new DoomEngine(module);
+    const engine = new DoomEngine(doomModule);
     engine.start();
     return engine;
   }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { exitHoldMs, mapArrowsToDoom, usePulse, USE_PULSE_EVERY_TICKS, USE_PULSE_HOLD_TICKS } from './doom-controls';
+import { exitHoldMs, mapArrowsToDoom, pulseUse, USE_PULSE_EVERY_TICKS, USE_PULSE_HOLD_TICKS } from './doom-controls';
 
 describe('управление Doom стрелками', () => {
   it('одиночные стрелки', () => {
@@ -17,10 +17,10 @@ describe('управление Doom стрелками', () => {
     expect(mapArrowsToDoom(new Set(['ArrowLeft', 'ArrowRight']))).toMatchObject({ left: false, right: false });
   });
   it('«использовать» нажимается периодически', () => {
-    const pulses = Array.from({ length: USE_PULSE_EVERY_TICKS * 3 }, (_, t) => usePulse(t));
+    const pulses = Array.from({ length: USE_PULSE_EVERY_TICKS * 3 }, (_, t) => pulseUse(t));
     expect(pulses.filter(Boolean).length).toBe(USE_PULSE_HOLD_TICKS * 3);
-    expect(usePulse(0)).toBe(true);
-    expect(usePulse(USE_PULSE_HOLD_TICKS)).toBe(false);
+    expect(pulseUse(0)).toBe(true);
+    expect(pulseUse(USE_PULSE_HOLD_TICKS)).toBe(false);
   });
   it('удержание выхода считается только при обеих боковых', () => {
     const both = new Set(['ArrowLeft', 'ArrowRight']);

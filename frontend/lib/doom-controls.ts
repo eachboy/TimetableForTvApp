@@ -34,7 +34,7 @@ export const USE_PULSE_EVERY_TICKS = 12;
 export const USE_PULSE_HOLD_TICKS = 3;
 
 /** Состояние кнопки «использовать» на такте. */
-export function usePulse(tick: number): boolean {
+export function pulseUse(tick: number): boolean {
   return tick % USE_PULSE_EVERY_TICKS < USE_PULSE_HOLD_TICKS;
 }
 

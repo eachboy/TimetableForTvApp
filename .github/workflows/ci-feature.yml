@@ -9,6 +9,7 @@ on:
     paths:
       - "frontend/**"
       - "admin-panel/**"
+      - "shared/**"
       - ".github/workflows/ci-feature.yml"
   pull_request:
     branches:
@@ -17,6 +18,7 @@ on:
     paths:
       - "frontend/**"
       - "admin-panel/**"
+      - "shared/**"
       - ".github/workflows/ci-feature.yml"
   workflow_dispatch:
 
@@ -90,11 +92,15 @@ jobs:
             touch src-tauri/timetable.db
           fi
 
-      - name: Rust check
-        run: cd src-tauri && cargo check
-
       - name: Build Next.js
         run: npm run build
+
+      # frontendDist (../out) должен существовать до компиляции Tauri
+      - name: Rust check
+        run: cd src-tauri && cargo check --locked
+
+      - name: Rust tests
+        run: cd src-tauri && cargo test --locked
 
       - name: Upload frontend build metadata
         if: always()
@@ -134,11 +140,11 @@ jobs:
       - name: Type check
         run: npx tsc --noEmit
 
-      - name: Unit tests
-        run: npm test -- --passWithNoTests
-
       - name: Lint
         run: npm run lint --if-present
+
+      - name: Unit tests
+        run: npm test -- --passWithNoTests
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -163,11 +169,15 @@ jobs:
             libgtk-3-dev \
             libssl-dev
 
-      - name: Rust check
-        run: cd src-tauri && cargo check
-
-      - name: Build frontend assets
+      - name: Build Next.js
         run: npm run build
+
+      # frontendDist (../out) должен существовать до компиляции Tauri
+      - name: Rust check
+        run: cd src-tauri && cargo check --locked
+
+      - name: Rust tests
+        run: cd src-tauri && cargo test --locked
 
       - name: Upload admin-panel build metadata
         if: always()

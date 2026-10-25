@@ -7,7 +7,6 @@ interface ScheduleAppBarProps {
   rooms: Room[];
   selectedRoom: Room | null;
   onRoomChange: (room: Room | null) => void;
-  /** Выбранная неделя для отображения (если не передана — текущая) */
   currentWeek?: number;
 }
 
@@ -15,7 +14,6 @@ export function ScheduleAppBar({ rooms, selectedRoom, onRoomChange, currentWeek:
   const [time, setTime] = useState<string>('');
   const [date, setDate] = useState<string>('');
 
-  // Используем переданную выбранную неделю или текущую
   const displayWeek = selectedWeek ?? getCurrentWeekNumber();
   const weekType = getWeekType(displayWeek);
   const semesterInfo = getSemesterInfo(displayWeek);
@@ -23,68 +21,88 @@ export function ScheduleAppBar({ rooms, selectedRoom, onRoomChange, currentWeek:
   useEffect(() => {
     const updateTime = () => {
       const now = new Date();
-
-      const hours = String(now.getHours()).padStart(2, '0');
-      const minutes = String(now.getMinutes()).padStart(2, '0');
-      setTime(`${hours}:${minutes}`);
-
-      const options: Intl.DateTimeFormatOptions = {
-        day: 'numeric',
-        month: 'long',
-        year: 'numeric',
-        localeMatcher: 'best fit'
-      };
-      setDate(now.toLocaleDateString('ru-RU', options));
+      setTime(`${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`);
+      setDate(now.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' }));
     };
-
     updateTime();
     const interval = setInterval(updateTime, 1000);
     return () => clearInterval(interval);
   }, []);
 
   return (
-    <div className="w-full bg-gray-100 border-b border-gray-300 px-6 py-2">
-      <div className="flex justify-between items-center">
-        <div className="flex items-center gap-8">
-          <div>
-            <div className="text-sm text-gray-600 mt-1">{date}</div>
-            <div className="text-xl font-bold text-gray-900">{time}</div>
+    <div className="w-full bg-zinc-900 border-b border-zinc-800 px-6 py-3 shrink-0">
+      <div className="flex items-center justify-between gap-4">
+
+        {/* Время и дата */}
+        <div className="shrink-0 min-w-[12vw]">
+          <div
+            className="font-bold text-white leading-none tabular-nums"
+            style={{ fontSize: 'clamp(1.8rem, 3vw, 3.5rem)' }}
+          >
+            {time}
+          </div>
+          <div
+            className="text-zinc-400 mt-1"
+            style={{ fontSize: 'clamp(0.7rem, 1vw, 1rem)' }}
+          >
+            {date}
           </div>
         </div>
-        <div className="flex-1 flex flex-col items-center justify-center">
-          <div className="text-sm text-gray-600 mb-2">Кабинеты</div>
-          <div className="flex items-center gap-2">
+
+        {/* Кабинеты */}
+        <div className="flex-1 flex flex-col items-center gap-2 min-w-0">
+          <div
+            className="text-zinc-500 uppercase tracking-widest"
+            style={{ fontSize: 'clamp(0.55rem, 0.7vw, 0.8rem)' }}
+          >
+            Кабинет
+          </div>
+          <div className="flex items-center flex-wrap justify-center gap-2">
             {rooms.map(room => (
               <button
                 key={room.id}
                 onClick={() => onRoomChange(selectedRoom?.id === room.id ? null : room)}
-                className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
+                className={`rounded-md font-semibold transition-colors ${
                   selectedRoom?.id === room.id
                     ? 'bg-blue-600 text-white'
-                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                    : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
                 }`}
+                style={{
+                  fontSize: 'clamp(0.75rem, 1.1vw, 1.2rem)',
+                  padding: 'clamp(0.25rem, 0.4vw, 0.5rem) clamp(0.6rem, 1vw, 1.2rem)',
+                }}
               >
                 {room.number}
               </button>
             ))}
           </div>
         </div>
-        <div className="flex items-center gap-6">
-          <div className="text-right">
-            <div className="text-sm text-gray-600">Семестр</div>
-            <div className="text-lg font-bold text-gray-900">{semesterInfo.label}</div>
-          </div>
-          <div className="text-right">
-            <div className="text-sm text-gray-600">Учебная неделя</div>
-            <div className="text-xl font-bold text-gray-900">{displayWeek}</div>
-          </div>
-          <div className="text-right">
-            <div className="text-sm text-gray-600 w-23">Тип недели</div>
-            <div className="text-xl font-bold text-gray-900">{weekType}</div>
-          </div>
+
+        {/* Инфо о неделе — фиксированная ширина на каждый блок исключает сдвиг при смене текста */}
+        <div className="shrink-0 flex gap-5 text-right">
+          {[
+            { label: 'Семестр', value: semesterInfo.label, color: 'text-white',         minW: '13vw' },
+            { label: 'Неделя',  value: String(displayWeek), color: 'text-white tabular-nums', minW: '3vw'  },
+            { label: 'Тип',     value: weekType,            color: 'text-blue-400',     minW: '8vw'  },
+          ].map(({ label, value, color, minW }) => (
+            <div key={label} className="flex flex-col items-end" style={{ minWidth: minW }}>
+              <div
+                className="text-zinc-500 uppercase tracking-widest whitespace-nowrap"
+                style={{ fontSize: 'clamp(0.55rem, 0.65vw, 0.75rem)' }}
+              >
+                {label}
+              </div>
+              <div
+                className={`font-bold leading-tight whitespace-nowrap ${color}`}
+                style={{ fontSize: 'clamp(1rem, 1.4vw, 1.6rem)' }}
+              >
+                {value}
+              </div>
+            </div>
+          ))}
         </div>
+
       </div>
     </div>
   );
 }
-

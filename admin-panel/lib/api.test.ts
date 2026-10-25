@@ -27,3 +27,15 @@ describe('getApiUrl', () => {
     expect(url).toMatch(/^https?:\/\//);
   });
 });
+
+describe('адрес TV вручную', () => {
+  it('приводит ввод к http://host:8000', async () => {
+    const { normalizeTvAddress } = await import('./api');
+    expect(normalizeTvAddress('172.16.38.169')).toBe('http://172.16.38.169:8000');
+    expect(normalizeTvAddress(' 172.16.38.169:8001 ')).toBe('http://172.16.38.169:8001');
+    expect(normalizeTvAddress('http://tv.local/')).toBe('http://tv.local:8000');
+    expect(normalizeTvAddress('')).toBeNull();
+    expect(normalizeTvAddress('bad host!')).toBeNull();
+    expect(normalizeTvAddress('http://a b')).toBeNull();
+  });
+});

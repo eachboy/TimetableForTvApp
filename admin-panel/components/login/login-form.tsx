@@ -11,7 +11,7 @@ import {
   FieldLabel,
 } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
-import { login } from "@/lib/api"
+import { getManualTvAddress, login, setManualTvAddress } from "@/lib/api"
 import { setAuthToken, setUser } from "@/lib/auth"
 
 export function LoginForm({
@@ -22,6 +22,26 @@ export function LoginForm({
   const [username, setUsername] = React.useState("")
   const [password, setPassword] = React.useState("")
   const [loading, setLoading] = React.useState(false)
+  // Адрес TV вручную: по умолчанию скрыт, запоминается между запусками.
+  const [showTv, setShowTv] = React.useState(false)
+  const [tvAddress, setTvAddress] = React.useState("")
+  const [tvSaving, setTvSaving] = React.useState(false)
+
+  React.useEffect(() => {
+    setTvAddress(getManualTvAddress() ?? "")
+  }, [])
+
+  const saveTvAddress = async () => {
+    setTvSaving(true)
+    try {
+      const result = await setManualTvAddress(tvAddress)
+      if (result.url) setTvAddress(result.url)
+      if (result.ok) toast.success(result.message)
+      else toast.error(result.message)
+    } finally {
+      setTvSaving(false)
+    }
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -84,6 +104,40 @@ export function LoginForm({
             {loading ? "Вход..." : "Войти"}
           </Button>
         </Field>
+        <div className="flex flex-col gap-2">
+          <button
+            type="button"
+            className="text-muted-foreground hover:text-foreground self-center text-xs underline-offset-4 hover:underline"
+            onClick={() => setShowTv((v) => !v)}
+          >
+            {showTv ? "Скрыть адрес TV" : "Указать адрес TV вручную"}
+          </button>
+          {showTv && (
+            <Field>
+              <FieldLabel htmlFor="tv-address">IP-адрес TV</FieldLabel>
+              <div className="flex gap-2">
+                <Input
+                  id="tv-address"
+                  type="text"
+                  inputMode="decimal"
+                  placeholder="172.16.38.169 (пусто — автопоиск)"
+                  value={tvAddress}
+                  onChange={(e) => setTvAddress(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault()
+                      void saveTvAddress()
+                    }
+                  }}
+                  disabled={tvSaving}
+                />
+                <Button type="button" variant="outline" onClick={() => void saveTvAddress()} disabled={tvSaving}>
+                  {tvSaving ? "..." : "Запомнить"}
+                </Button>
+              </div>
+            </Field>
+          )}
+        </div>
       </FieldGroup>
     </form>
   )

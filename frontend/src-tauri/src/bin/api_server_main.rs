@@ -62,6 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&media_dir)?;
 
     db::init(&db_path, &media_dir).map_err(|e| format!("DB init: {}", e))?;
+    app_lib::secure_api::init(db_path.parent());
     println!("DB ready at {}", db_path.display());
 
     let addr: std::net::SocketAddr = ([0, 0, 0, 0], 8000).into();
@@ -71,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(listener, app.into_make_service()).await
+        axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await
     })?;
     Ok(())
 }

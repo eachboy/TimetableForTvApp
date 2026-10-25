@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react"
 import { useRouter, usePathname } from "next/navigation"
 import { isAuthenticated } from "@/lib/auth"
+import { ConnectionProvider } from "@/components/connection-provider"
 
 export function AuthGuard({ children }: { children: React.ReactNode }) {
   const router = useRouter()
@@ -34,6 +35,6 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
     return null
   }
 
-  return <>{children}</>
+  return <ConnectionProvider>{children}</ConnectionProvider>
 }
 

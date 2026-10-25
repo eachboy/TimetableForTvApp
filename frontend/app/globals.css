@@ -133,5 +133,5 @@
   }
 }
 
-html, body, * { cursor: none !important; }
-input, textarea, select, button, a, [role="button"] { cursor: auto !important; }
+/* Дисплей управляется 4 кнопками: курсор не показываем нигде. */
+html, body, *, *::before, *::after { cursor: none !important; }

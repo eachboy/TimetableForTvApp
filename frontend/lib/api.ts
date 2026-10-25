@@ -140,7 +140,6 @@ export async function fetchSchedule(params?: {
   if (isTauri()) {
     const { invoke } = await import('@tauri-apps/api/core');
     const list = await invoke<ScheduleItem[]>('api_get_schedule', {
-      // Для Tauri invoke используем camelCase имена аргументов Rust-команды.
       roomId: params?.room_id,
       teacherId: params?.teacher_id,
       dayOfWeek: params?.day_of_week,

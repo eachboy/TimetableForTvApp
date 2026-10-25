@@ -16,6 +16,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 interface RoomWithSchedule {
   room: Room;
   todayClasses: ScheduleItem[];
+  nearestDate?: string;
 }
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
@@ -161,9 +162,13 @@ export default function Home() {
               .filter((entry): entry is { item: ScheduleItem; start: Date } => entry !== null)
               .sort((a, b) => a.start.getTime() - b.start.getTime());
 
-            const nearest = candidates.length > 0 ? candidates[0].item : null;
+            const nearestEntry = candidates.length > 0 ? candidates[0] : null;
 
-            return { room, todayClasses: nearest ? [nearest] : [] };
+            return {
+              room,
+              todayClasses: nearestEntry ? [nearestEntry.item] : [],
+              nearestDate: nearestEntry ? nearestEntry.start.toLocaleDateString('ru-RU') : undefined,
+            };
           } catch {
             return { room, todayClasses: [] };
           }
@@ -180,7 +185,6 @@ export default function Home() {
   }, []);
 
   // При монтировании: в Tauri бэкенд уже готов (окно показывают после wait_for_backend), иначе ждём /api/health
-  const [retryKey, setRetryKey] = useState(0);
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -207,13 +211,7 @@ export default function Home() {
       }
     })();
     return () => { cancelled = true; };
-  }, [loadData, retryKey]);
-
-  const handleRetryConnection = useCallback(() => {
-    setBackendStatus('waiting');
-    setLoading(true);
-    setRetryKey((k) => k + 1);
-  }, []);
+  }, [loadData]);
 
   // Периодическое обновление каждые 30 секунд
   useEffect(() => {
@@ -252,17 +250,10 @@ export default function Home() {
         {backendStatus === 'timeout' && (
           <>
             <div className="text-zinc-500 text-sm text-center max-w-md">
-              Сервер не ответил за 30 сек. Перезапустите приложение или нажмите «Повторить».
+              Сервер не ответил за 30 сек. Повторная попытка выполняется автоматически.
               <br />
               Если не помогло — в папке приложения должен быть файл backend (exe).
             </div>
-            <button
-              type="button"
-              onClick={handleRetryConnection}
-              className="px-4 py-2 rounded-lg bg-zinc-700 text-white hover:bg-zinc-600 text-sm font-medium"
-            >
-              Повторить
-            </button>
           </>
         )}
       </div>
@@ -270,13 +261,13 @@ export default function Home() {
   }
 
   return (
-    <div className="min-h-screen bg-black flex flex-col">
-      <div className="flex-1 flex flex-col px-4 py-4 max-w-[1920px] mx-auto w-full">
+    <div className="h-screen overflow-hidden bg-black flex flex-col">
+      <div className="flex-1 min-h-0 flex flex-col px-4 py-4 max-w-[1920px] mx-auto w-full">
 
         {/* Шапка */}
         <div className="mb-4 flex justify-between align-center shrink-0">
           <h1 className="text-2xl font-bold text-white">интересное</h1>
-          <Theather />
+          
           <CurrentTime />
         </div>
 
@@ -301,7 +292,7 @@ export default function Home() {
           <div className="hidden lg:block w-px bg-zinc-800 self-stretch shrink-0" />
 
           {/* Правая колонка — расписание */}
-          <div className="w-full lg:w-[402px] shrink-0 items-center">
+          <div className="relative w-full lg:w-[402px] min-h-[320px] lg:min-h-0 shrink-0">
             <ScheduleSidebar roomsWithSchedule={roomsWithSchedule} />
           </div>
 

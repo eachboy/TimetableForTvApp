@@ -1,93 +1,85 @@
-// src-tauri/src/mdns_discovery.rs  (Frontend)
+// src-tauri/src/mdns_discovery.rs  (Frontend / TV)
+//
+// TV НЕ ищет admin-panel сам: он пассивно ждёт, пока admin-panel найдёт его и
+// пришлёт зашифрованный `register` (см. api_server.rs → /api/admin-panel/register).
+// Здесь остаётся только работа с уже известным адресом панели:
+//   1. URL, сохранённый при последнем успешном handshake (admin-panel.json);
+//   2. URL из переменных окружения (ручная настройка, опционально).
+// Никакого сканирования подсети и mDNS-поиска со стороны TV больше нет.
 
-use mdns_sd::{ServiceDaemon, ServiceEvent};
 use std::time::Duration;
-use tokio::time::timeout;
 
-const SERVICE_TYPE: &str = "_timetable-update._tcp.local.";
+use crate::admin_panel_config;
+
+/// Лёгкие пути admin-panel для проверки доступности.
+const ADMIN_PANEL_PROBE_PATHS: &[&str] = &["healthz", "latest.json", "weather.json"];
 
 pub async fn discover_update_server(timeout_secs: u64) -> Option<String> {
-    // Запускаем блокирующий browse в отдельном потоке и ограничиваем общее время ожидания.
-    let browse_timeout = Duration::from_secs(timeout_secs.max(5)); // не меньше 5 секунд
-
-    let result = timeout(
-        browse_timeout,
-        tokio::task::spawn_blocking(move || browse_for_service(timeout_secs)),
-    )
-    .await;
-
-    match result {
-        Ok(Ok(Some(url))) => Some(url),
-        Ok(Ok(None)) => {
-            log::debug!(
-                "mDNS browse completed without resolving any service ({}s window)",
-                timeout_secs
-            );
-            None
-        }
-        Ok(Err(e)) => {
-            log::warn!("mDNS browse task failed: {}", e);
-            None
-        }
-        Err(_) => {
-            log::debug!("mDNS discovery timed out after {}s", timeout_secs);
-            None
-        }
-    }
+    known_admin_panel_url(timeout_secs).await
 }
 
-fn browse_for_service(timeout_secs: u64) -> Option<String> {
-    log::info!(
-        "mDNS browse started for {} with timeout {}s",
-        SERVICE_TYPE,
-        timeout_secs
-    );
+pub async fn discover_weather_server(timeout_secs: u64) -> Option<String> {
+    known_admin_panel_url(timeout_secs).await
+}
 
-    let daemon = ServiceDaemon::new().ok()?;
-    let receiver = daemon.browse(SERVICE_TYPE).ok()?;
+/// Известен ли вообще адрес панели (иначе TV просто ждёт handshake и не считает это ошибкой).
+pub fn has_known_admin_panel() -> bool {
+    admin_panel_config::load_admin_panel_url().is_some() || !configured_urls().is_empty()
+}
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs.max(5));
+async fn known_admin_panel_url(_timeout_secs: u64) -> Option<String> {
+    if admin_panel_config::waiting_for_handshake() {
+        log::info!("{}", admin_panel_config::waiting_message());
+        return None;
+    }
 
-    loop {
-        if std::time::Instant::now() > deadline {
-            break;
-        }
-
-        match receiver.recv_timeout(Duration::from_millis(200)) {
-            Ok(ServiceEvent::ServiceResolved(info)) => {
-                log::info!(
-                    "mDNS ServiceResolved: fullname={}, addresses_v4={:?}, port={}",
-                    info.get_fullname(),
-                    info.get_addresses_v4(),
-                    info.get_port()
-                );
-                let ip = info
-                    .get_addresses_v4()
-                    .into_iter()
-                    .next()
-                    .map(|addr| addr.to_string())?;
-
-                let port = info.get_port();
-                let url = format!("http://{}:{}", ip, port);
-
-                log::info!("mDNS resolved: {} → {}", info.get_fullname(), url);
-
-                let _ = daemon.stop_browse(SERVICE_TYPE);
-                return Some(url);
-            }
-            Ok(ServiceEvent::SearchStarted(_)) => {
-                log::debug!("mDNS SearchStarted event for {}", SERVICE_TYPE);
-            }
-            Ok(ev) => {
-                log::debug!("mDNS event: {:?}", ev);
-            }
-            Err(_) => {
-                // Таймаут ожидания или временная ошибка — продолжаем цикл
-                std::thread::sleep(Duration::from_millis(100));
-            }
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(url) = admin_panel_config::load_admin_panel_url() {
+        candidates.push(url);
+    }
+    for url in configured_urls() {
+        if !candidates.contains(&url) {
+            candidates.push(url);
         }
     }
 
-    let _ = daemon.stop_browse(SERVICE_TYPE);
+    for url in candidates {
+        if probe_admin_panel_url(&url).await {
+            return Some(url);
+        }
+        log::warn!("Admin-panel is not reachable at {}", url);
+    }
     None
+}
+
+fn configured_urls() -> Vec<String> {
+    let mut out = Vec::new();
+    for key in ["TIMETABLE_UPDATE_SERVER_URL", "TIMETABLE_ADMIN_PANEL_URL"] {
+        if let Ok(value) = std::env::var(key) {
+            let normalized = value.trim().trim_end_matches('/').to_string();
+            if !normalized.is_empty() && !out.contains(&normalized) {
+                out.push(normalized);
+            }
+        }
+    }
+    out
+}
+
+async fn probe_admin_panel_url(base_url: &str) -> bool {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_millis(1500))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    for path in ADMIN_PANEL_PROBE_PATHS {
+        let url = format!("{}/{}", base_url.trim_end_matches('/'), path);
+        if let Ok(resp) = client.get(&url).send().await {
+            if resp.status().is_success() {
+                return true;
+            }
+        }
+    }
+    false
 }

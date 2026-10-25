@@ -1,12 +1,28 @@
 // src-tauri/src/lib.rs  (Frontend)
 
 use tauri::Manager;
+use tauri_plugin_autostart::MacosLauncher;
+use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_updater::UpdaterExt;
 
+mod admin_panel_config;
 pub mod api_server;
 pub mod db;
 mod mdns_discovery;
-use mdns_discovery::discover_update_server;
+mod mdns_api_advertise;
+// Общий с admin-panel модуль защищённого канала (лежит в <repo>/shared).
+#[path = "../../../shared/secure_channel.rs"]
+pub mod secure_channel;
+#[path = "../../../shared/firewall.rs"]
+pub mod firewall;
+#[path = "../../../shared/pairing.rs"]
+pub mod pairing;
+pub mod secure_api;
+use admin_panel_config::{
+    initialize as initialize_admin_panel_config, record_connection_failure,
+    record_connection_success, waiting_for_handshake, waiting_message,
+};
+use mdns_discovery::{discover_update_server, discover_weather_server, has_known_admin_panel};
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct WeatherData {
@@ -69,54 +85,84 @@ fn api_get_schedule_upcoming(limit: Option<i64>) -> Result<Vec<db::ScheduleItemR
 }
 
 /// Команда для Timetable: получить текущую погоду от admin-panel.
-/// Admin-panel должна отдавать JSON `weather.json` с полями:
+/// Admin-panel отдаёт JSON `weather.json` с полями:
 /// { "temperature": number, "temp_min": number, "temp_max": number, "description": string, "condition": string, "date": "YYYY-MM-DD" }
+/// и подписывает его в заголовке `X-TT-Sig` (HMAC от общего ключа) — подделка в сети отвергается.
+///
+/// TV сам панель не ищет: адрес известен только после зашифрованного handshake от admin-panel.
 #[tauri::command]
 async fn api_get_weather() -> Result<WeatherData, String> {
-    // Ищем admin-panel в локальной сети так же, как для обновлений, с fallback-URL.
-    let mut candidates: Vec<String> = Vec::new();
-
-    if let Some(url) = discover_update_server(10).await {
-        candidates.push(url);
+    if waiting_for_handshake() {
+        return Err(waiting_message());
     }
 
-    // Fallback-адреса для случая, когда mDNS не сработал.
-    candidates.push("http://timetable-admin.local:9000".to_string());
-    candidates.push("http://127.0.0.1:9000".to_string());
+    let Some(base) = discover_weather_server(15).await else {
+        if has_known_admin_panel() {
+            let status = record_connection_failure();
+            return Err(format!(
+                "Admin Panel is not reachable; failed attempts: {}",
+                status.failure_count
+            ));
+        }
+        return Err("Waiting for admin-panel handshake (admin-panel has not found this TV yet)".to_string());
+    };
 
-    let mut last_error: Option<String> = None;
-
-    for base in candidates {
-        let weather_url = format!("{}/weather.json", base.trim_end_matches('/'));
-        match reqwest::get(&weather_url).await {
-            Ok(resp) if resp.status().is_success() => {
-                let data: WeatherData = resp
-                    .json()
-                    .await
-                    .map_err(|e| format!("Failed to parse weather JSON from {}: {}", weather_url, e))?;
-                return Ok(data);
-            }
-            Ok(resp) => {
-                last_error = Some(format!(
-                    "Weather endpoint {} returned {}",
-                    weather_url,
-                    resp.status()
-                ));
-            }
-            Err(e) => {
-                last_error = Some(format!("Weather request to {} failed: {}", weather_url, e));
-            }
+    match fetch_signed_weather(&base).await {
+        Ok(data) => {
+            record_connection_success();
+            Ok(data)
+        }
+        Err(e) => {
+            record_connection_failure();
+            Err(e)
         }
     }
+}
 
-    Err(last_error.unwrap_or_else(|| {
-        "Admin Panel (update server) not found in local network or via fallback".to_string()
-    }))
+async fn fetch_signed_weather(base: &str) -> Result<WeatherData, String> {
+    if !secure_api::security().is_paired() {
+        return Err("TV is not paired with an admin-panel yet".to_string());
+    }
+
+    let weather_url = format!("{}/weather.json", base.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .get(&weather_url)
+        .send()
+        .await
+        .map_err(|e| format!("Weather request to {} failed: {}", weather_url, e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Weather endpoint {} returned {}", weather_url, resp.status()));
+    }
+    let signature = resp
+        .headers()
+        .get("x-tt-sig")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let body = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Weather read failed: {}", e))?;
+    parse_signed_weather(&body, signature.as_deref())
+}
+
+/// Проверяет подпись и разбирает погоду.
+pub(crate) fn parse_signed_weather(
+    body: &[u8],
+    signature: Option<&str>,
+) -> Result<WeatherData, String> {
+    secure_api::security().verify_weather(body, signature)?;
+    serde_json::from_slice::<WeatherData>(body)
+        .map_err(|e| format!("Failed to parse weather JSON: {}", e))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
@@ -145,6 +191,31 @@ pub fn run() {
 
             std::fs::create_dir_all(&app_data_dir)
                 .expect("Failed to create app data directory");
+
+            initialize_admin_panel_config(app_data_dir.join("admin-panel.json"));
+
+            // Секреты защищённого канала (JWT уникален для установки, хранится в app data).
+            // Просим Windows открыть порты 8000/5353 (окно UAC), иначе админка с другого ПК не достучится.
+            firewall::ensure_in_background(&firewall::TV_RULES);
+            secure_api::init(Some(&app_data_dir));
+
+            // Дисплей управляется 4 кнопками — системный курсор не нужен нигде.
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_cursor_visible(false);
+            }
+
+            // Включаем автозапуск при старте системы (TV-киоск должен запускаться автоматически)
+            let autolaunch = app.autolaunch();
+            match autolaunch.is_enabled() {
+                Ok(true) => log::info!("Autostart already enabled"),
+                _ => {
+                    if let Err(e) = autolaunch.enable() {
+                        log::warn!("Failed to enable autostart: {}", e);
+                    } else {
+                        log::info!("Autostart enabled successfully");
+                    }
+                }
+            }
 
             let db_path = app_data_dir.join("timetable.db");
 
@@ -202,11 +273,23 @@ pub fn run() {
                 log::info!("Local DB ready at {}", db_path.display());
                 let addr: std::net::SocketAddr = ([0, 0, 0, 0], 8000).into();
                 api_server::run_api_server(addr, media_dir.clone());
+
+                // Объявляем REST API в mDNS — admin-panel находит Timetable без полного скана LAN.
+                match mdns_api_advertise::MdnsTimetableApi::register() {
+                    Ok(service) => {
+                        Box::leak(Box::new(service));
+                    }
+                    Err(e) => log::warn!(
+                        "Timetable API mDNS advertise failed (admin-panel may rely on subnet scan): {}",
+                        e
+                    ),
+                }
             }
 
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Some(window) = handle.get_webview_window("main") {
+                    let _ = window.set_cursor_visible(false);
                     let _ = window.show();
                 }
 
@@ -292,83 +375,46 @@ fn seconds_until_07_00() -> u64 {
     }
 }
 
-/// Находимся ли сейчас внутри активного окна поиска mDNS/обновлений (07:00–23:59).
-fn is_mdns_active_window() -> bool {
-    let (hour, _minute) = current_local_hour_minute();
-    hour >= 7 && hour <= 23
-}
-
 async fn check_and_apply_update(handle: &tauri::AppHandle) {
-    log::info!("Checking for updates via mDNS...");
+    log::info!("Checking for updates (admin-panel address from handshake)...");
 
-    // Если admin-panel ещё не видна по mDNS, в активное окно (07:00–23:59)
-    // пробуем искать её в цикле с разумным интервалом. После нескольких неудач
-    // используем fallback-URL, чтобы покрыть сценарии, когда mDNS недоступен,
-    // но admin-panel всё же работает по HTTP.
-    let mut attempts: u32 = 0;
+    if waiting_for_handshake() {
+        log::info!("{}", waiting_message());
+        return;
+    }
 
-    let server_url = loop {
-        if !is_mdns_active_window() {
-            log::info!("Leaving mDNS search loop: outside active window");
-            return;
-        }
-
-        match discover_update_server(10).await {
-            Some(url) => {
-                log::info!("Found update server via mDNS: {}", url);
-                break url;
+    // TV пассивен: адрес панели появляется только после зашифрованного handshake
+    // (admin-panel сама ищет TV в сети). Пока адреса нет — просто ждём, это не ошибка.
+    let Some(server_url) = discover_update_server(15).await else {
+        if has_known_admin_panel() {
+            let status = record_connection_failure();
+            if status.waiting_for_handshake {
+                log::warn!("{}", waiting_message());
             }
-            None => {
-                attempts += 1;
-                log::info!(
-                    "Admin Panel not found in local network via mDNS (attempt {}), will retry discovery or use fallback",
-                    attempts
-                );
-
-                // После нескольких безуспешных попыток пробуем fallback-адреса.
-                if attempts >= 3 {
-                    // Пробуем стандартные fallback-адреса: локальный хостнейм и loopback.
-                    let candidates = [
-                        "http://timetable-admin.local:9000".to_string(),
-                        "http://127.0.0.1:9000".to_string(),
-                    ];
-                    let mut reachable_fallback: Option<String> = None;
-                    for url in &candidates {
-                        log::info!("Trying fallback update server URL: {}", url);
-                        if reqwest::get(
-                            format!("{}/latest.json", url).trim_end_matches('/'),
-                        )
-                        .await
-                        .is_ok()
-                        {
-                            log::info!("Fallback update server is reachable: {}", url);
-                            reachable_fallback = Some(url.clone());
-                            break;
-                        }
-                    }
-                    if let Some(url) = reachable_fallback {
-                        break url;
-                    }
-                }
-
-                // Пока admin-panel нет в сети — продолжаем искать с интервалом ~60 секунд.
-                tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-            }
+        } else {
+            log::info!("Waiting for admin-panel to find this TV (no handshake yet)");
         }
+        return;
     };
 
     let latest_url = format!("{}/latest.json", server_url.trim_end_matches('/'));
 
     match reqwest::get(&latest_url).await {
         Ok(resp) if resp.status().is_success() => {
+            record_connection_success();
             log::info!("Update server responded OK");
         }
         Ok(resp) => {
+            record_connection_success();
             log::info!("Update server returned {}, no update available", resp.status());
             return;
         }
         Err(e) => {
+            let status = record_connection_failure();
             log::warn!("Cannot reach update server: {}", e);
+            if status.waiting_for_handshake {
+                log::warn!("{}", waiting_message());
+            }
             return;
         }
     }
@@ -400,6 +446,7 @@ async fn check_and_apply_update(handle: &tauri::AppHandle) {
     let update = match updater.check().await {
         Ok(Some(update)) => update,
         Ok(None) => {
+            record_connection_success();
             log::info!("Already up to date");
             return;
         }
@@ -419,6 +466,7 @@ async fn check_and_apply_update(handle: &tauri::AppHandle) {
 
     match update.download_and_install(|_chunk, _total| {}, || {}).await {
         Ok(_) => {
+            record_connection_success();
             log::info!("Update installed, restarting...");
         }
         Err(e) => {

@@ -1,6 +1,176 @@
+import { describeDiagnosis, diagnoseTv, secureFetch, verifyTv, type TvDiagnosis } from '@/lib/secure-channel';
+
 const DEFAULT_API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000';
+const API_URL_STORAGE_KEY = 'timetable_admin_api_url';
+const MANUAL_TV_STORAGE_KEY = 'timetable_admin_manual_tv';
+const API_PORT = 8000;
+const LAN_SCAN_TIMEOUT_MS = 1200;
+const LAN_SCAN_CONCURRENCY = 24;
+
+function isTauri(): boolean {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+}
+
+/** Вызов Tauri-команды с безопасным динамическим импортом (не ломает SSR). */
+async function tauriInvoke<T>(cmd: string): Promise<T | null> {
+  if (!isTauri()) return null;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return await invoke<T>(cmd);
+  } catch (e) {
+    console.warn(`[Tauri] invoke("${cmd}") failed:`, e);
+    return null;
+  }
+}
+
+/** Вызов Tauri-команды с аргументами. */
+async function tauriInvokeArgs<T>(cmd: string, args: Record<string, unknown>): Promise<T | null> {
+  if (!isTauri()) return null;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return await invoke<T>(cmd, args);
+  } catch (e) {
+    console.warn(`[Tauri] invoke("${cmd}") failed:`, e);
+    return null;
+  }
+}
 
 let resolvedApiUrl: string | null = null;
+
+/** Последняя известная причина, почему TV не подключается (для сообщений пользователю). */
+let lastDiagnosis: TvDiagnosis | null = null;
+
+/** Причина от Rust-поиска (оболочка Tauri), например «TV уже сопряжён с другой панелью». */
+let lastRustProblem: string | null = null;
+
+export function getLastConnectionProblem(): string | null {
+  if (lastRustProblem) return lastRustProblem;
+  if (lastDiagnosis && lastDiagnosis !== 'ok') return describeDiagnosis(lastDiagnosis);
+  return null;
+}
+
+interface LinkDiagnostics {
+  host?: string;
+  local_ips?: string[];
+  panel_url?: string;
+  key_ready?: boolean;
+  key_file?: string | null;
+  tv_url?: string | null;
+  last_error?: string | null;
+  summary?: string;
+  hint_url?: string | null;
+}
+
+/** «Кто» подключается: этот ПК, его адреса и адрес сервиса панели. */
+async function describeThisPanel(): Promise<string> {
+  const d = await tauriInvoke<LinkDiagnostics>('cmd_get_diagnostics');
+  if (!d) {
+    return typeof window !== 'undefined' ? `панель в браузере (${window.location.origin})` : 'панель';
+  }
+  const ips = d.local_ips?.length ? d.local_ips.join(', ') : 'IP не определён';
+  return `панель на ПК ${d.host ?? '?'} (${ips}), сервис панели ${d.panel_url ?? '?'}`;
+}
+
+/** Подробное сообщение: кто, к кому, почему не вышло и что проверялось. */
+async function buildFailureMessage(target: string | null, reason: string): Promise<string> {
+  const who = await describeThisPanel();
+  const d = await tauriInvoke<LinkDiagnostics>('cmd_get_diagnostics');
+  const lines = [
+    `Кто подключается: ${who}.`,
+    `К кому: ${target ? `TV ${target}` : 'TV (адрес не определён, идёт поиск в сети)'}.`,
+    `Причина: ${reason}.`,
+  ];
+  if (d?.summary) lines.push(`Поиск: ${d.summary}.`);
+  if (d && d.key_ready === false) lines.push(`Ключ панели не создан (файл: ${d.key_file ?? 'путь неизвестен'}).`);
+  return lines.join(' ');
+}
+
+async function refreshRustProblem(): Promise<void> {
+  const st = await tauriInvoke<{ state?: string; last_error?: string | null; tv_url?: string | null }>('cmd_get_link_status');
+  lastRustProblem = st && st.state !== 'connected' ? st.last_error ?? null : null;
+  if (lastRustProblem) {
+    lastRustProblem = await buildFailureMessage(st?.tv_url ?? null, lastRustProblem);
+  }
+}
+
+// ─── Статус соединения ────────────────────────────────────────────────────────
+
+export type ConnectionStatus = 'unknown' | 'connected' | 'disconnected';
+let _connectionStatus: ConnectionStatus = 'unknown';
+const _connectionListeners = new Set<(s: ConnectionStatus) => void>();
+
+function setConnectionStatus(s: ConnectionStatus) {
+  if (s === 'connected') {
+    lastDiagnosis = null;
+    lastRustProblem = null;
+  }
+  if (_connectionStatus === s) return;
+  _connectionStatus = s;
+  _connectionListeners.forEach(fn => fn(s));
+}
+
+export function getConnectionStatus(): ConnectionStatus {
+  return _connectionStatus;
+}
+
+/** Подписаться на изменения статуса. Возвращает функцию отписки. */
+export function onConnectionChange(fn: (s: ConnectionStatus) => void): () => void {
+  _connectionListeners.add(fn);
+  return () => _connectionListeners.delete(fn);
+}
+
+/** Сбросить кэш URL — следующий вызов заново ищет timetable. */
+export function resetConnectionCache(): void {
+  resolvedApiUrl = null;
+  clearStoredApiUrl();
+  setConnectionStatus('unknown');
+}
+
+// ─── Фоновый health-check ─────────────────────────────────────────────────────
+
+let _healthCheckTimer: ReturnType<typeof setInterval> | null = null;
+
+export function startConnectionHealthCheck(intervalMs = 30_000): void {
+  if (_healthCheckTimer !== null) return;
+  _healthCheckTimer = setInterval(async () => {
+    if (resolvedApiUrl) {
+      // Есть кэшированный URL — проверяем его
+      const ok = await checkUrl(resolvedApiUrl);
+      if (ok) {
+        setConnectionStatus('connected');
+        return;
+      }
+      // Упал — выясняем причину, сбрасываем и пробуем найти заново
+      lastDiagnosis = await diagnoseTv(resolvedApiUrl);
+      console.warn('[API] TV недоступен:', describeDiagnosis(lastDiagnosis));
+      lastRustProblem = await buildFailureMessage(resolvedApiUrl, describeDiagnosis(lastDiagnosis));
+      resolvedApiUrl = null;
+      clearStoredApiUrl();
+      setConnectionStatus('disconnected');
+    }
+
+    // Нет URL или потеряли — пробуем переобнаружить прямо сейчас
+    if (isTauri()) {
+      const found = await tauriInvoke<string | null>('cmd_discover_timetable_api');
+      if (found) {
+        resolvedApiUrl = found;
+        setStoredApiUrl(found);
+        lastDiagnosis = null;
+        lastRustProblem = null;
+        setConnectionStatus('connected');
+      } else {
+        await refreshRustProblem();
+      }
+    }
+  }, intervalMs);
+}
+
+export function stopConnectionHealthCheck(): void {
+  if (_healthCheckTimer !== null) {
+    clearInterval(_healthCheckTimer);
+    _healthCheckTimer = null;
+  }
+}
 
 async function detectLocalIP(): Promise<string | null> {
   return new Promise((resolve) => {
@@ -37,49 +207,242 @@ async function detectLocalIP(): Promise<string | null> {
   });
 }
 
+/**
+ * Адрес считается найденным, только если там настоящий TV, сопряжённый с этой панелью.
+ * Если TV ещё ни с кем не сопряжён — оболочка Tauri сопрягается с ним автоматически (без кодов).
+ */
 async function checkUrl(url: string): Promise<boolean> {
-  try {
-    const res = await fetch(`${url}/api/health`, {
-      signal: AbortSignal.timeout(2000),
-    });
-    return res.ok;
-  } catch {
-    return false;
+  let diagnosis = await diagnoseTv(url, LAN_SCAN_TIMEOUT_MS);
+  if (diagnosis === 'not-paired' && isTauri()) {
+    const paired = await tauriInvokeArgs<boolean>('cmd_pair_with_tv', { url });
+    if (paired) diagnosis = await diagnoseTv(url, LAN_SCAN_TIMEOUT_MS);
   }
+  if (diagnosis !== 'ok' && diagnosis !== 'unreachable' && diagnosis !== 'not-tv') lastDiagnosis = diagnosis;
+  return diagnosis === 'ok';
+}
+
+function isLocalHostname(hostname: string): boolean {
+  return hostname === 'localhost' || hostname === '127.0.0.1';
+}
+
+function isIPv4Address(value: string): boolean {
+  return /^(\d{1,3}\.){3}\d{1,3}$/.test(value);
+}
+
+function getStoredApiUrl(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.localStorage.getItem(API_URL_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function setStoredApiUrl(url: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(API_URL_STORAGE_KEY, url);
+  } catch {
+    // ignore
+  }
+}
+
+function clearStoredApiUrl(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(API_URL_STORAGE_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+// ─── Адрес TV, введённый вручную (в интерфейсе скрыт по умолчанию) ─────────────
+
+/** Приводит ввод к виду http://host:8000. Принимает «172.16.38.169», «host:8000», «http://host». */
+export function normalizeTvAddress(input: string): string | null {
+  let v = input.trim().replace(/\/+$/, '');
+  if (!v) return null;
+  if (!/^https?:\/\//i.test(v)) v = `http://${v}`;
+  let u: URL;
+  try {
+    u = new URL(v);
+  } catch {
+    return null;
+  }
+  if (!/^[A-Za-z0-9.-]+$/.test(u.hostname)) return null;
+  return `${u.protocol}//${u.hostname}:${u.port || API_PORT}`;
+}
+
+export function getManualTvAddress(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.localStorage.getItem(MANUAL_TV_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Запоминает адрес TV (пустая строка — забыть и вернуться к автопоиску).
+ * Адрес проверяется сразу; он запоминается, даже если TV пока недоступен.
+ */
+export async function setManualTvAddress(
+  input: string,
+): Promise<{ ok: boolean; url: string | null; message: string }> {
+  const url = normalizeTvAddress(input);
+  if (input.trim() && !url) {
+    return { ok: false, url: null, message: 'Некорректный адрес. Пример: 172.16.38.169 или 172.16.38.169:8000' };
+  }
+  try {
+    if (url) window.localStorage.setItem(MANUAL_TV_STORAGE_KEY, url);
+    else window.localStorage.removeItem(MANUAL_TV_STORAGE_KEY);
+  } catch {
+    // localStorage недоступен — адрес не сохранится между запусками
+  }
+  await tauriInvokeArgs('cmd_set_manual_tv', { url });
+  resetConnectionCache();
+  if (!url) return { ok: true, url: null, message: 'Адрес удалён, используется автопоиск' };
+  if (await checkUrl(url)) {
+    resolvedApiUrl = url;
+    setStoredApiUrl(url);
+    setConnectionStatus('connected');
+    return { ok: true, url, message: `Адрес сохранён, TV ${url} подключён` };
+  }
+  const reason = lastDiagnosis && lastDiagnosis !== 'ok' ? describeDiagnosis(lastDiagnosis) : 'нет ответа';
+  return { ok: false, url, message: `Адрес ${url} сохранён, но подключиться не удалось: ${reason}` };
+}
+
+async function resolveFirstReachable(urls: string[]): Promise<string | null> {
+  const seen = new Set<string>();
+  for (const url of urls) {
+    const normalized = url.trim().replace(/\/+$/, '');
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    if (await checkUrl(normalized)) {
+      resolvedApiUrl = normalized;
+      setStoredApiUrl(normalized);
+      setConnectionStatus('connected');
+      return normalized;
+    }
+  }
+  return null;
+}
+
+async function scanSubnetForApi(prefix: string, skipHosts: Set<number>): Promise<string | null> {
+  const hosts: number[] = [];
+  for (let host = 1; host <= 254; host += 1) {
+    if (!skipHosts.has(host)) hosts.push(host);
+  }
+
+  for (let i = 0; i < hosts.length; i += LAN_SCAN_CONCURRENCY) {
+    const batch = hosts.slice(i, i + LAN_SCAN_CONCURRENCY);
+    const results = await Promise.all(
+      batch.map(async (host) => {
+        const url = `http://${prefix}.${host}:${API_PORT}`;
+        return (await checkUrl(url)) ? url : null;
+      }),
+    );
+
+    const found = results.find((url): url is string => Boolean(url));
+    if (found) {
+      resolvedApiUrl = found;
+      setStoredApiUrl(found);
+      setConnectionStatus('connected');
+      return found;
+    }
+  }
+
+  return null;
 }
 
 export async function getApiUrl(): Promise<string> {
   if (resolvedApiUrl) return resolvedApiUrl;
 
-  // 1. Если задан явно при сборке — используем его
-  if (process.env.NEXT_PUBLIC_API_URL) {
-    resolvedApiUrl = process.env.NEXT_PUBLIC_API_URL;
-    console.log('[API] Backend (env):', resolvedApiUrl);
+  // 0. Адрес, введённый вручную: проверяется первым; если не подошёл — поиск продолжается.
+  const manual = getManualTvAddress();
+  if (manual) {
+    if (await checkUrl(manual)) {
+      resolvedApiUrl = manual;
+      setConnectionStatus('connected');
+      console.log('[API] Backend (manual):', resolvedApiUrl);
+      return resolvedApiUrl;
+    }
+    console.warn(`[API] Заданный вручную адрес ${manual} не подошёл. Запускаю автопоиск...`);
+  }
+
+  // 1. Адрес из переменной окружения при сборке — предпочтительный, но только если там
+  //    действительно наш TV. Иначе (старый IP, смена адреса) продолжаем автоматический поиск.
+  const envUrl = process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/+$/, '');
+  if (envUrl) {
+    if (await checkUrl(envUrl)) {
+      resolvedApiUrl = envUrl;
+      setConnectionStatus('connected');
+      console.log('[API] Backend (env):', resolvedApiUrl);
+      return resolvedApiUrl;
+    }
+    console.warn(`[API] Адрес из .env (${envUrl}) не подошёл${lastDiagnosis ? ': ' + describeDiagnosis(lastDiagnosis) : ''}. Запускаю автопоиск в сети...`);
+  }
+
+  // 2. Закэшированный URL из прошлой сессии
+  const storedUrl = getStoredApiUrl();
+  if (storedUrl && await checkUrl(storedUrl)) {
+    resolvedApiUrl = storedUrl;
+    setConnectionStatus('connected');
+    console.log('[API] Backend (stored):', resolvedApiUrl);
     return resolvedApiUrl;
   }
+  clearStoredApiUrl();
 
-  // 2. С localhost/127.0.0.1 сначала пробуем 127.0.0.1:8000 (обычный dev)
-  if (typeof window !== 'undefined' && /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(window.location.host)) {
-    if (await checkUrl(DEFAULT_API_URL)) {
-      resolvedApiUrl = DEFAULT_API_URL;
-      console.log('[API] Backend (local):', resolvedApiUrl);
+  // 3. Прямые локальные кандидаты (localhost / текущий хост страницы)
+  const directCandidates: string[] = [];
+  if (typeof window !== 'undefined') {
+    const pageHost = window.location.hostname;
+    if (!isLocalHostname(pageHost)) {
+      directCandidates.push(`http://${pageHost}:${API_PORT}`);
+    } else {
+      directCandidates.push(DEFAULT_API_URL, `http://localhost:${API_PORT}`);
+    }
+  }
+  const directMatch = await resolveFirstReachable(directCandidates);
+  if (directMatch) {
+    console.log('[API] Backend (direct):', directMatch);
+    return directMatch;
+  }
+
+  // 4. В Tauri: параллельное сканирование подсети на Rust-стороне
+  //    (WebRTC недоступен в WebView, поэтому JS-вариант ненадёжен)
+  if (isTauri()) {
+    console.log('[API] Starting Rust LAN scan...');
+    const tauriUrl = await tauriInvoke<string | null>('cmd_discover_timetable_api');
+    if (tauriUrl) {
+      resolvedApiUrl = tauriUrl;
+      setStoredApiUrl(tauriUrl);
+      setConnectionStatus('connected');
+      console.log('[API] Backend (Tauri scan):', resolvedApiUrl);
       return resolvedApiUrl;
     }
   }
 
-  // 3. Пробуем локальный IP в сети (для доступа с других устройств в LAN)
+  // 5. Fallback: JS subnet scan (для браузерного режима / dev)
   const localIP = await detectLocalIP();
-  if (localIP) {
-    const networkUrl = `http://${localIP}:8000`;
-    if (await checkUrl(networkUrl)) {
-      resolvedApiUrl = networkUrl;
-      console.log('[API] Backend (network):', resolvedApiUrl);
-      return resolvedApiUrl;
+  if (localIP && isIPv4Address(localIP)) {
+    const [a, b, c, d] = localIP.split('.').map(Number);
+    const subnetMatch = await scanSubnetForApi(
+      `${a}.${b}.${c}`,
+      new Set<number>(Number.isFinite(d) ? [d] : []),
+    );
+    if (subnetMatch) {
+      console.log('[API] Backend (JS subnet):', subnetMatch);
+      return subnetMatch;
     }
   }
 
-  // 4. Fallback: 127.0.0.1:8000
-  resolvedApiUrl = DEFAULT_API_URL;
+  // 6. Последний fallback
+  lastRustProblem = await buildFailureMessage(
+    envUrl || null,
+    lastDiagnosis && lastDiagnosis !== 'ok' ? describeDiagnosis(lastDiagnosis) : 'TV не найден в локальной сети',
+  );
+  resolvedApiUrl = envUrl || DEFAULT_API_URL;
   console.log('[API] Backend (fallback):', resolvedApiUrl);
   return resolvedApiUrl;
 }
@@ -87,7 +450,23 @@ export async function getApiUrl(): Promise<string> {
 // Обёртка для fetch с автоматическим определением URL. При !res.ok бросает Error с текстом от бэкенда (detail).
 async function apiFetch(path: string, options?: RequestInit): Promise<Response> {
   const baseUrl = await getApiUrl();
-  const res = await fetch(`${baseUrl}${path}`, options);
+  let res: Response;
+  try {
+    res = await secureFetch(baseUrl, path, options);
+  } catch (e) {
+    // Сбрасываем кэш: при следующем запросе пройдёт повторное обнаружение
+    if (resolvedApiUrl === baseUrl) {
+      resolvedApiUrl = null;
+      clearStoredApiUrl();
+      setConnectionStatus('disconnected');
+    }
+    lastDiagnosis = await diagnoseTv(baseUrl);
+    const reason = lastDiagnosis === 'ok'
+      ? (e instanceof Error ? e.message : String(e))
+      : describeDiagnosis(lastDiagnosis);
+    throw new Error(await buildFailureMessage(baseUrl, reason));
+  }
+  setConnectionStatus('connected');
   if (!res.ok) {
     let detail = res.statusText;
     try {
@@ -216,6 +595,29 @@ export async function login(
   return res.json().catch(() => {
     throw new Error('Неверный логин или пароль');
   });
+}
+
+// Сопряжение
+export interface PairingStatus {
+  /** unpaired — ждёт первую панель; open — окно для новой панели открыто; closed — сопряжён. */
+  state: 'unpaired' | 'open' | 'closed';
+  paired_panels: number;
+  window_secs: number;
+}
+
+export async function fetchPairingStatus(): Promise<PairingStatus> {
+  const res = await apiFetch('/api/security/status');
+  return res.json();
+}
+
+/** Разрешить подключение ещё одной панели к этому TV (окно на 5 минут). Нужен вход администратора. */
+export async function allowNewPanel(token?: string): Promise<PairingStatus> {
+  const t = token ?? getStoredToken();
+  const res = await apiFetch('/api/security/allow-pairing', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${t}` },
+  });
+  return res.json();
 }
 
 // Teachers
@@ -442,7 +844,7 @@ export async function updateAccount(
 export async function exportDatabase(token?: string): Promise<Blob> {
   const t = token ?? getStoredToken();
   const baseUrl = await getApiUrl();
-  const res = await fetch(`${baseUrl}/api/database/export`, {
+  const res = await secureFetch(baseUrl, '/api/database/export', {
     headers: { Authorization: `Bearer ${t}` },
   });
   if (!res.ok) throw new Error('Ошибка скачивания резервной копии');
@@ -455,7 +857,7 @@ export async function restoreDatabase(file: File, token?: string): Promise<{ det
   const baseUrl = await getApiUrl();
   const form = new FormData();
   form.append('file', file);
-  const res = await fetch(`${baseUrl}/api/database/restore`, {
+  const res = await secureFetch(baseUrl, '/api/database/restore', {
     method: 'POST',
     headers: { Authorization: `Bearer ${t}` },
     body: form,

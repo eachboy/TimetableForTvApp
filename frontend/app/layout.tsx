@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { SecretGamesActivator } from "@/components/secret-games-activator";
 
 // Используем системные шрифты для Electron сборки
 // чтобы избежать проблем с загрузкой Google Fonts при сборке
@@ -26,6 +27,7 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
+        <SecretGamesActivator />
         {children}
       </body>
     </html>

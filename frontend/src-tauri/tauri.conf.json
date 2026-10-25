@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Timetable",
-  "version": "1.2.0",
+  "version": "1.3.3",
   "identifier": "com.eachboy.Timetable",
   "build": {
     "frontendDist": "../out",
@@ -25,19 +25,24 @@
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": ["**/*"]
+        "scope": [
+          "**/*"
+        ]
       }
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/icon.png",
       "icons/icon.ico"
     ],
     "externalBin": [],
-    "resources": ["timetable.db"],
+    "resources": [
+      "timetable.db"
+    ],
     "windows": {
       "wix": {},
       "nsis": {}
@@ -48,7 +53,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IHJzaWduIGVuY3J5cHRlZCBzZWNyZXQga2V5ClJXUlRZMEl5K3E1ODhaL0JZK2hZNlJUb3lSNWZGeG5oWjZxb3pjd3c4NUwvandKS2U0TUFBQkFBQUFBQUFBQUFBQUlBQUFBQUQxL3JaWnczTlNXR1h6b0c5ZXN4OStCMFRvZVFkckU3Z25BLzhKdTZUR1Q2bG1uKytrUkJNb29ucGpZT3pKNVM3dERPZ2xqd1g3cjltZVlTcFVxMEhObjZJRzYxS1RlSHl2c1pOWXlETk5ORFJSNkFVZ2J5TEhvMFBSM3cyQnNDUHV4ZzBUdGJiRjg9Cg==",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVGRTcxQUU3NDVBQzQ0QzMKUldURFJLeEY1eHJuN3drYkZKeFJ3ZnhodkdRMUdyKzZjSFVDazQyVXRrSEMzSjZ3QXh2aTZvcUoK",
       "endpoints": [
         "http://timetable-admin.local:9000/latest.json"
       ],

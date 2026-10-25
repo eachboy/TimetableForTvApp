@@ -1,7 +1,8 @@
 //! HTTP API на 127.0.0.1:8000 — полный аналог Python-бэкенда для admin panel.
 
 use axum::{
-    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Multipart, Path, Query, State},
+    Extension,
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -9,17 +10,27 @@ use axum::{
     Json, Router,
 };
 use serde::Deserialize;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
+use crate::admin_panel_config;
 use crate::db::{
     self, AccountRow, ActiveScheduleItem, MediaRow, NewsRow, NotificationRow, RoomRow,
     ScheduleItemRow, TeacherRow,
 };
 
-const SECRET_KEY: &str = "your-secret-key-change-in-production";
 const ACCESS_TOKEN_EXPIRE_HOURS: i64 = 2;
+/// Максимальный размер тела запроса (видео, резервная копия БД).
+const API_BODY_LIMIT: usize = 500 * 1024 * 1024;
+
+/// Минимум между вызовами `POST .../weather/refresh` при запросах с IP панели (кроме register).
+const ADMIN_PANEL_WEATHER_REFRESH_MIN_INTERVAL: Duration = Duration::from_secs(60);
+
+lazy_static::lazy_static! {
+    static ref LAST_ADMIN_WEATHER_REFRESH: Mutex<Option<Instant>> = Mutex::new(None);
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -85,12 +96,105 @@ async fn cors_middleware(request: axum::extract::Request, next: Next) -> Respons
     Response::from_parts(parts, body)
 }
 
+/// Триггер обновления погоды на admin-panel (Open-Meteo → weather.json в cache update-сервера).
+async fn request_admin_panel_weather_refresh(base_url: &str) {
+    let url = format!("{}/weather/refresh", base_url.trim_end_matches('/'));
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(45))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("weather refresh: cannot build HTTP client: {}", e);
+            return;
+        }
+    };
+    let mut request = client.post(&url);
+    if let Some(psk) = crate::secure_api::security().signing_psk() {
+        request = request.header(
+            "X-TT-Auth",
+            crate::secure_channel::make_auth_header(
+                &psk,
+                crate::secure_channel::PURPOSE_WEATHER_REFRESH,
+                crate::secure_api::admin_now_ms(),
+            ),
+        );
+    }
+    match request.send().await {
+        Ok(resp) if resp.status().is_success() => {
+            log::info!("Admin-panel weather refresh OK ({})", url);
+        }
+        Ok(resp) => {
+            log::warn!(
+                "Admin-panel weather refresh returned {} for {}",
+                resp.status(),
+                url
+            );
+        }
+        Err(e) => log::warn!("Admin-panel weather refresh request failed: {} ({})", e, url),
+    }
+}
+
+fn try_schedule_throttled_admin_panel_weather_refresh(base_url: String) {
+    let mut last = LAST_ADMIN_WEATHER_REFRESH.lock().unwrap();
+    let now = Instant::now();
+    if let Some(prev) = *last {
+        if now.duration_since(prev) < ADMIN_PANEL_WEATHER_REFRESH_MIN_INTERVAL {
+            return;
+        }
+    }
+    *last = Some(now);
+    drop(last);
+    tokio::spawn(async move {
+        request_admin_panel_weather_refresh(&base_url).await;
+    });
+}
+
+fn should_trigger_weather_refresh_for_client(path: &str, client_ip: IpAddr) -> bool {
+    if !path.starts_with("/api/") {
+        return false;
+    }
+    if matches!(
+        path,
+        "/api/health" | "/api/auth/login" | "/api/admin-panel/register" | "/api/security/status"
+    ) {
+        return false;
+    }
+    let Some(stored) = admin_panel_config::load_last_admin_ip() else {
+        return false;
+    };
+    client_ip == stored
+}
+
+/// При запросах к API с IP admin-panel — просим панель обновить weather.json (с троттлингом).
+async fn admin_panel_weather_middleware(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    if *request.method() == axum::http::Method::OPTIONS {
+        return next.run(request).await;
+    }
+    let path = request.uri().path();
+    if should_trigger_weather_refresh_for_client(path, remote_addr.ip()) {
+        if let Some(base) = admin_panel_config::load_admin_panel_url() {
+            try_schedule_throttled_admin_panel_weather_refresh(base);
+        }
+    }
+    next.run(request).await
+}
+
 /// Собирает Router API (для встраивания в Tauri или для standalone-бинарника).
 /// Возвращает Router<()> (state уже подставлен), пригодный для into_make_service().
+///
+/// Структура:
+/// * `api` — обработчики `/api/*` (с проверкой JWT для изменяющих запросов);
+/// * внешний роутер добавляет `/sc/hello`, туннель `/sc` (внутри — тот же `api`),
+///   политику «снаружи только шифрованный канал» и CORS.
 pub fn create_app(media_dir: PathBuf) -> Router<()> {
     let state = Arc::new(AppState { media_dir });
 
-    Router::new()
+    let api: Router<()> = Router::new()
         .route("/", get(root))
         .route("/api/health", get(api_health))
         .route("/api/teachers", get(get_teachers).post(create_teacher))
@@ -115,13 +219,32 @@ pub fn create_app(media_dir: PathBuf) -> Router<()> {
         .route("/api/dashboard/active-schedule", get(dashboard_active_schedule))
         .route("/api/dashboard/notifications", get(dashboard_notifications))
         .route("/api/dashboard/notifications/:id/read", patch(mark_notification_read))
+        .route("/api/admin-panel/register", post(admin_panel_register))
+        .route("/api/security/status", get(crate::secure_api::api_security_status))
+        .route("/api/security/allow-pairing", post(crate::secure_api::api_allow_pairing))
+        .route("/api/security/reset-pairing", post(crate::secure_api::api_reset_pairing))
         .route("/api/database/export", get(database_export))
         .route("/api/database/restore", post(database_restore))
         // Разрешаем загрузку крупных медиафайлов (видео) через multipart.
         // По умолчанию лимит тела запроса слишком мал для видео.
-        .layer(DefaultBodyLimit::max(500 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(API_BODY_LIMIT))
+        .layer(middleware::from_fn(admin_panel_weather_middleware))
+        .layer(middleware::from_fn(crate::secure_api::require_auth_for_mutations))
+        .with_state(state);
+
+    let tunnel_routes: Router<()> = Router::new()
+        .route("/sc", post(crate::secure_api::tunnel))
+        .with_state(api.clone());
+
+    Router::new()
+        .route("/sc/hello", get(crate::secure_api::hello))
+        .route("/sc/pair", post(crate::secure_api::pair))
+        .merge(tunnel_routes)
+        .merge(api)
+        // +1 МБ запаса на заголовки/шифрование поверх тела.
+        .layer(DefaultBodyLimit::max(API_BODY_LIMIT + 1024 * 1024))
+        .layer(middleware::from_fn(crate::secure_api::plain_policy))
         .layer(middleware::from_fn(cors_middleware))
-        .with_state(state)
 }
 
 /// Запускает API-сервер в фоне (для Tauri). Слушает на всех интерфейсах (0.0.0.0:8000).
@@ -130,7 +253,9 @@ pub fn run_api_server(addr: SocketAddr, media_dir: PathBuf) {
     tauri::async_runtime::spawn(async move {
         let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
         log::info!("API server listening on http://{}", addr);
-        axum::serve(listener, app.into_make_service()).await.unwrap();
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+            .await
+            .unwrap();
     });
 }
 
@@ -146,6 +271,77 @@ async fn api_health() -> Json<serde_json::Value> {
         "status": "healthy",
         "timestamp": chrono::Utc::now().to_rfc3339()
     }))
+}
+
+#[derive(Deserialize, Default)]
+struct AdminPanelRegisterRequest {
+    base_url: Option<String>,
+    /// Часы admin-panel (мс): у TV нет интернета/NTP, поэтому сверяемся с панелью.
+    admin_time_ms: Option<i64>,
+}
+
+async fn admin_panel_register(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    kid: Option<Extension<crate::secure_api::SecureChannelKid>>,
+    Json(body): Json<AdminPanelRegisterRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if let Some(Extension(k)) = kid {
+        crate::secure_api::security().set_admin_kid(k.0);
+    }
+    if let Some(t) = body.admin_time_ms {
+        crate::secure_api::set_admin_clock(t);
+    }
+    let candidate_url = normalize_admin_panel_base_url(body.base_url, remote_addr.ip());
+    let saved_url = admin_panel_config::save_admin_panel_url(&candidate_url, remote_addr.ip())
+        .map_err(ApiError::Db)?;
+
+    let refresh_target = saved_url.clone();
+    tokio::spawn(async move {
+        request_admin_panel_weather_refresh(&refresh_target).await;
+    });
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "base_url": saved_url,
+        "remote_ip": remote_addr.ip().to_string(),
+    })))
+}
+
+fn normalize_admin_panel_base_url(base_url: Option<String>, remote_ip: IpAddr) -> String {
+    let fallback = || format!("http://{}:9000", remote_ip);
+
+    let Some(raw_url) = base_url.map(|value| value.trim().trim_end_matches('/').to_string()) else {
+        return fallback();
+    };
+
+    if raw_url.is_empty() {
+        return fallback();
+    }
+
+    let Ok(mut parsed) = url::Url::parse(&raw_url) else {
+        return fallback();
+    };
+
+    let should_replace_host = match parsed.host_str() {
+        Some("localhost") => true,
+        Some(host) => match host.parse::<IpAddr>() {
+            Ok(ip) => ip.is_loopback() || ip.is_unspecified(),
+            Err(_) => false,
+        },
+        None => true,
+    };
+
+    if should_replace_host {
+        if parsed.set_host(Some(&remote_ip.to_string())).is_err() {
+            return fallback();
+        }
+    }
+
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    parsed.set_path("");
+
+    parsed.to_string().trim_end_matches('/').to_string()
 }
 
 // ─── Auth ───────────────────────────────────────────────────────────────────
@@ -190,7 +386,7 @@ fn create_jwt(username: &str) -> Result<String, String> {
     jsonwebtoken::encode(
         &jsonwebtoken::Header::default(),
         &claims,
-        &jsonwebtoken::EncodingKey::from_secret(SECRET_KEY.as_bytes()),
+        &jsonwebtoken::EncodingKey::from_secret(crate::secure_api::jwt_secret()),
     )
     .map_err(|e| e.to_string())
 }
@@ -198,14 +394,14 @@ fn create_jwt(username: &str) -> Result<String, String> {
 fn decode_jwt(token: &str) -> Result<String, String> {
     let token_data = jsonwebtoken::decode::<JwtClaims>(
         token,
-        &jsonwebtoken::DecodingKey::from_secret(SECRET_KEY.as_bytes()),
+        &jsonwebtoken::DecodingKey::from_secret(crate::secure_api::jwt_secret()),
         &jsonwebtoken::Validation::default(),
     )
     .map_err(|_| "invalid token".to_string())?;
     Ok(token_data.claims.sub)
 }
 
-fn bearer_username(headers: &HeaderMap) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+pub(crate) fn bearer_username(headers: &HeaderMap) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
     let auth = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -821,6 +1017,346 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::secure_channel::{self as sc, Psk};
+    use axum::body::Body;
+    use axum::http::Request;
+    use std::collections::BTreeMap;
+    use std::sync::Once;
+    use tower::ServiceExt;
+
+    const TEST_SECRET: &str = "api-server-test-secret";
+    const REMOTE: &str = "192.168.1.50:51000";
+    const LOOPBACK: &str = "127.0.0.1:51001";
+
+    fn setup() -> Router {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let td = tempfile::tempdir().expect("tempdir");
+            let dir = td.path().to_path_buf();
+            std::mem::forget(td); // каталог нужен до конца процесса тестов
+            std::env::set_var("TIMETABLE_PSK", TEST_SECRET);
+            db::init(&dir.join("t.db"), &dir.join("media")).expect("db init");
+            std::fs::create_dir_all(dir.join("media")).unwrap();
+            crate::secure_api::init(Some(&dir));
+            admin_panel_config::initialize(dir.join("admin-panel.json"));
+        });
+        create_app(std::env::temp_dir())
+    }
+
+    fn psk() -> Psk {
+        Psk::from_secret(TEST_SECRET)
+    }
+
+    fn peer(addr: &str) -> ConnectInfo<SocketAddr> {
+        ConnectInfo(addr.parse().unwrap())
+    }
+
+    fn json_headers(token: Option<&str>) -> BTreeMap<String, String> {
+        let mut h = BTreeMap::new();
+        h.insert("content-type".to_string(), "application/json".to_string());
+        if let Some(t) = token {
+            h.insert("authorization".to_string(), format!("Bearer {}", t));
+        }
+        h
+    }
+
+    /// Плоский HTTP-запрос (без туннеля).
+    async fn plain(app: &Router, method: &str, path: &str, from: &str, body: &str) -> (StatusCode, Vec<u8>) {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        req.extensions_mut().insert(peer(from));
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        (status, bytes.to_vec())
+    }
+
+    /// Отправляет сырой пакет в /sc.
+    async fn post_sc(app: &Router, wire: Vec<u8>, from: &str) -> (StatusCode, Vec<u8>) {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/sc")
+            .body(Body::from(wire))
+            .unwrap();
+        req.extensions_mut().insert(peer(from));
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        (status, bytes.to_vec())
+    }
+
+    /// Полный вызов через туннель. Возвращает (HTTP-статус внутреннего ответа, тело).
+    async fn tunnel(
+        app: &Router,
+        method: &str,
+        path: &str,
+        token: Option<&str>,
+        body: &str,
+        from: &str,
+    ) -> (u16, Vec<u8>) {
+        let (wire, salt, id) =
+            sc::build_request(&psk(), method, path, json_headers(token), body.as_bytes(), 0).unwrap();
+        let (status, bytes) = post_sc(app, wire, from).await;
+        assert_eq!(status, StatusCode::OK, "tunnel transport failed: {}", String::from_utf8_lossy(&bytes));
+        let (meta, payload) = sc::parse_response(&psk(), &salt, &id, &bytes).expect("decrypt response");
+        (meta.status, payload)
+    }
+
+    #[tokio::test]
+    async fn tunnel_serves_api_and_hides_payload() {
+        let app = setup();
+        let token = create_jwt("tester").unwrap();
+        let (st, body) = tunnel(&app, "POST", "/api/rooms", Some(&token), r#"{"number":"TUNNEL-101"}"#, REMOTE).await;
+        assert!(st == 200 || st == 201, "create_room via tunnel returned {}", st);
+        assert!(String::from_utf8_lossy(&body).contains("TUNNEL-101"));
+
+        let (st, body) = tunnel(&app, "GET", "/api/rooms", None, "", REMOTE).await;
+        assert_eq!(st, 200);
+        assert!(String::from_utf8_lossy(&body).contains("TUNNEL-101"));
+    }
+
+    #[tokio::test]
+    async fn remote_plain_http_is_refused_but_health_is_open() {
+        let app = setup();
+        let (st, _) = plain(&app, "GET", "/api/rooms", REMOTE, "").await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let (st, _) = plain(&app, "GET", "/api/schedule", REMOTE, "").await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let (st, _) = plain(&app, "GET", "/api/database/export", REMOTE, "").await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let (st, _) = plain(&app, "GET", "/api/health", REMOTE, "").await;
+        assert_eq!(st, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn loopback_plain_http_still_works_for_local_dev() {
+        let app = setup();
+        let (st, _) = plain(&app, "GET", "/api/rooms", LOOPBACK, "").await;
+        assert_eq!(st, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn mutations_require_valid_jwt_even_inside_tunnel() {
+        let app = setup();
+        let (st, _) = tunnel(&app, "POST", "/api/rooms", None, r#"{"number":"NOAUTH"}"#, REMOTE).await;
+        assert_eq!(st, 401);
+        let (st, _) = tunnel(&app, "DELETE", "/api/rooms/1", Some("garbage"), "", REMOTE).await;
+        assert_eq!(st, 401);
+        // Плоский запрос с loopback тоже не может менять данные без токена
+        let (st, _) = plain(&app, "POST", "/api/rooms", LOOPBACK, r#"{"number":"NOAUTH"}"#).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn token_signed_with_old_hardcoded_secret_is_rejected() {
+        let app = setup();
+        let claims = JwtClaims {
+            sub: "attacker".into(),
+            exp: (chrono::Utc::now().timestamp() + 3600) as usize,
+        };
+        let forged = jsonwebtoken::encode(
+            &jsonwebtoken::Header::default(),
+            &claims,
+            &jsonwebtoken::EncodingKey::from_secret(b"your-secret-key-change-in-production"),
+        )
+        .unwrap();
+        let (st, _) = tunnel(&app, "POST", "/api/rooms", Some(&forged), r#"{"number":"FORGED"}"#, REMOTE).await;
+        assert_eq!(st, 401);
+        assert!(crate::secure_api::jwt_secret().len() >= 32);
+    }
+
+    #[tokio::test]
+    async fn replayed_packet_is_rejected() {
+        let app = setup();
+        let (wire, _, _) = sc::build_request(&psk(), "GET", "/api/rooms", json_headers(None), b"", 0).unwrap();
+        let (st1, _) = post_sc(&app, wire.clone(), REMOTE).await;
+        let (st2, body2) = post_sc(&app, wire, REMOTE).await;
+        assert_eq!(st1, StatusCode::OK);
+        assert_eq!(st2, StatusCode::UNAUTHORIZED);
+        assert!(String::from_utf8_lossy(&body2).contains("replayed"));
+    }
+
+    #[tokio::test]
+    async fn wrong_key_and_garbage_are_rejected() {
+        let app = setup();
+        let other = Psk::from_secret("someone-else");
+        let (wire, _, _) = sc::build_request(&other, "GET", "/api/rooms", json_headers(None), b"", 0).unwrap();
+        let (st, _) = post_sc(&app, wire, REMOTE).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        let (st, _) = post_sc(&app, vec![1, 2, 3], REMOTE).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        let (st, _) = post_sc(&app, vec![], REMOTE).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn clock_skew_reports_server_time() {
+        let app = setup();
+        let (wire, _, _) =
+            sc::build_request(&psk(), "GET", "/api/rooms", json_headers(None), b"", -10 * 60 * 1000).unwrap();
+        let (st, body) = post_sc(&app, wire, REMOTE).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["code"], "clock_skew");
+        assert!(v["server_time_ms"].as_i64().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn tunnel_cannot_reach_non_api_paths() {
+        let app = setup();
+        for path in ["/sc", "/sc/hello?c=abcdefgh1", "/api/../sc", "/"] {
+            let (wire, salt, id) = sc::build_request(&psk(), "GET", path, json_headers(None), b"", 0).unwrap();
+            let (st, bytes) = post_sc(&app, wire, REMOTE).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "path {} must be refused", path);
+            assert!(sc::parse_response(&psk(), &salt, &id, &bytes).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn register_works_only_through_tunnel_and_stores_admin_address() {
+        let app = setup();
+        let (st, _) = plain(&app, "POST", "/api/admin-panel/register", LOOPBACK, r#"{"base_url":"http://10.9.9.9:9000"}"#).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        assert_ne!(admin_panel_config::load_admin_panel_url().as_deref(), Some("http://10.9.9.9:9000"));
+
+        let (st, body) = tunnel(&app, "POST", "/api/admin-panel/register", None, r#"{"base_url":"http://192.168.1.50:9000"}"#, REMOTE).await;
+        assert_eq!(st, 200, "{}", String::from_utf8_lossy(&body));
+        assert_eq!(admin_panel_config::load_admin_panel_url().as_deref(), Some("http://192.168.1.50:9000"));
+    }
+
+    #[tokio::test]
+    async fn tv_clock_follows_admin_clock_from_register() {
+        // TV без интернета: часы ушли на час назад. Панель сообщает своё время в register.
+        let app = setup();
+        let admin_time = sc::now_ms() + 3_600_000;
+        let body = format!(r#"{{"base_url":"http://192.168.1.50:9000","admin_time_ms":{}}}"#, admin_time);
+        let (st, _) = tunnel(&app, "POST", "/api/admin-panel/register", None, &body, REMOTE).await;
+        assert_eq!(st, 200);
+        let drift = (crate::secure_api::admin_now_ms() - admin_time).abs();
+        assert!(drift < 5_000, "admin_now_ms must follow the panel clock, drift={}", drift);
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_remote_cannot_poison_admin_address() {
+        // Раньше любой запрос из LAN подменял адрес admin-panel. Теперь — нет.
+        let app = setup();
+        let before = admin_panel_config::load_admin_panel_url();
+        let (st, _) = plain(&app, "GET", "/api/rooms", "192.168.1.77:40000", "").await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        assert_eq!(admin_panel_config::load_admin_panel_url(), before);
+    }
+
+    /// Одна последовательность целиком (общее глобальное состояние TV): hello → окно → /sc/pair → туннель → сброс.
+    #[tokio::test]
+    async fn pairing_flow_over_http() {
+        let app = setup();
+        let kid = crate::pairing::kid(&psk());
+
+        // hello от панели с известным ключом: доказательство есть
+        let (st, body) = plain(&app, "GET", &format!("/sc/hello?c=nonce12345678&k={}", kid), REMOTE, "").await;
+        assert_eq!(st, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["proto"], "tt-sc1");
+        assert_eq!(v["state"], "paired");
+        assert!(sc::verify_hello(&psk(), "nonce12345678", v["proof"].as_str().unwrap()));
+        assert!(!sc::verify_hello(&Psk::from_secret("evil"), "nonce12345678", v["proof"].as_str().unwrap()));
+
+        // чужая панель: TV закрыт, доказательства и pair_pub нет
+        for q in ["/sc/hello?c=nonce12345678", "/sc/hello?c=nonce12345678&k=deadbeef"] {
+            let (_, body) = plain(&app, "GET", q, REMOTE, "").await;
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(v["state"], "foreign");
+            assert!(v.get("proof").is_none() && v.get("pair_pub").is_none());
+        }
+        let (st, _) = plain(&app, "GET", "/sc/hello?c=bad!", REMOTE, "").await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+
+        // пока окно закрыто, /sc/pair отказывает
+        let newcomer = Psk::from_bytes(sc::random_bytes());
+        let pair_body = |tv_pub_hex: &str, psk: &Psk| {
+            let tv_pub = crate::pairing::parse_pub(tv_pub_hex).unwrap();
+            let (admin_pub, blob) = crate::pairing::seal_pairing(&tv_pub, psk, "Новая панель").unwrap();
+            (
+                admin_pub,
+                tv_pub,
+                serde_json::json!({"admin_pub": sc::hex_encode(&admin_pub), "blob": sc::hex_encode(&blob)}).to_string(),
+            )
+        };
+        let tv_pub_hex = sc::hex_encode(&crate::secure_api::security_pair_public());
+        let (_, _, body) = pair_body(&tv_pub_hex, &newcomer);
+        let (st, _) = plain(&app, "POST", "/sc/pair", REMOTE, &body).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        assert!(crate::secure_api::security().find_psk(&crate::pairing::kid(&newcomer)).is_none());
+
+        // владелец разрешает (через туннель, нужен JWT)
+        let (st, _) = tunnel(&app, "POST", "/api/security/allow-pairing", None, "", REMOTE).await;
+        assert_eq!(st, 401, "allow-pairing requires a logged-in admin");
+        crate::secure_api::security().open_window();
+        let (_, body) = plain(&app, "GET", "/sc/hello?c=nonce12345678&k=deadbeef", REMOTE, "").await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["state"], "open");
+        let pair_pub = v["pair_pub"].as_str().unwrap().to_string();
+
+        // мусор не сопрягает
+        let (st, _) = plain(&app, "POST", "/sc/pair", REMOTE, r#"{"admin_pub":"00","blob":"zz"}"#).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, _) = plain(&app, "POST", "/sc/pair", REMOTE, &format!(r#"{{"admin_pub":"{}","blob":"{}"}}"#, "07".repeat(32), "aa".repeat(40))).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+
+        // настоящее сопряжение
+        let (admin_pub, tv_pub, body) = pair_body(&pair_pub, &newcomer);
+        let (st, resp) = plain(&app, "POST", "/sc/pair", REMOTE, &body).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&resp));
+        let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert!(crate::pairing::verify_pair_ack(&newcomer, &admin_pub, &tv_pub, v["ack"].as_str().unwrap()));
+        assert_eq!(v["kid"], crate::pairing::kid(&newcomer));
+
+        // окно закрылось
+        let third = Psk::from_bytes(sc::random_bytes());
+        let (_, _, body3) = pair_body(&pair_pub, &third);
+        let (st, _) = plain(&app, "POST", "/sc/pair", REMOTE, &body3).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+
+        // новая панель ходит через туннель своим ключом, старая — своим
+        let (wire, salt, id) =
+            sc::build_request(&newcomer, "GET", "/api/rooms", json_headers(None), b"", 0).unwrap();
+        let (st, bytes) = post_sc(&app, wire, REMOTE).await;
+        assert_eq!(st, StatusCode::OK);
+        let (meta, _) = sc::parse_response(&newcomer, &salt, &id, &bytes).expect("newcomer can decrypt");
+        assert_eq!(meta.status, 200);
+        assert_eq!(tunnel(&app, "GET", "/api/rooms", None, "", REMOTE).await.0, 200);
+
+        // сброс: только локально и не через туннель
+        let (st, _) = plain(&app, "POST", "/api/security/reset-pairing", REMOTE, "").await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let (st, _) = tunnel(&app, "POST", "/api/security/reset-pairing", None, "", LOOPBACK).await;
+        assert_eq!(st, 403);
+        assert!(crate::secure_api::security().find_psk(&crate::pairing::kid(&newcomer)).is_some());
+        let (st, _) = plain(&app, "POST", "/api/security/reset-pairing", LOOPBACK, "").await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(crate::secure_api::security().find_psk(&crate::pairing::kid(&newcomer)).is_none());
+        // ключ из окружения (ручное переопределение) остаётся
+        assert_eq!(tunnel(&app, "GET", "/api/rooms", None, "", REMOTE).await.0, 200);
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_for_tunnel_is_answered() {
+        let app = setup();
+        let mut req = Request::builder()
+            .method("OPTIONS")
+            .uri("/sc")
+            .header("origin", "http://tauri.localhost")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(peer(REMOTE));
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(resp.headers().contains_key("access-control-allow-origin"));
+    }
 
     #[test]
     fn test_hash_and_verify_password() {

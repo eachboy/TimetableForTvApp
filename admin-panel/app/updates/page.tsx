@@ -183,7 +183,7 @@ export default function UpdatesPage() {
                   loading={statusLoading}
                 />
                 <StatusRow
-                  label="mDNS (timetable-admin.local)"
+                  label="mDNS / LAN discovery"
                   ok={serverStatus?.mdnsRunning ?? false}
                   loading={statusLoading}
                   detail={

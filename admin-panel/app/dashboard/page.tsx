@@ -22,11 +22,20 @@ import type { z } from "zod"
 
 const DAY_NAMES = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота"]
 
-// parity mapping from API week_type
+// parity mapping from API week_type (нормализуем к нижнему регистру)
 const WEEK_TYPE_LABEL: Record<string, string> = {
   odd: "Нечётная",
   even: "Чётная",
-  both: "Обe",
+  both: "Обе",
+}
+function weekTypeToParity(weekType: string | undefined): string {
+  if (!weekType) return ""
+  return WEEK_TYPE_LABEL[weekType.toLowerCase()] ?? ""
+}
+function normalizeWeekType(weekType: string | undefined): "odd" | "even" | "both" {
+  const v = (weekType ?? "").toLowerCase()
+  if (v === "odd" || v === "even" || v === "both") return v
+  return "both"
 }
 
 const CLASS_TIMES = [
@@ -65,7 +74,7 @@ function EditDialog({ item, rooms, teachers, onClose, onSave }: EditDialogProps)
   const [groups, setGroups] = useState(item.groups)
   const [startDate, setStartDate] = useState(item.start_date.slice(0, 10))
   const [endDate, setEndDate] = useState(item.end_date.slice(0, 10))
-  const [weekType, setWeekType] = useState<"odd" | "even" | "both">(item.week_type)
+  const [weekType, setWeekType] = useState<"odd" | "even" | "both">(normalizeWeekType(item.week_type))
   const [classNumber, setClassNumber] = useState(item.class_number)
   const [dayOfWeek, setDayOfWeek] = useState(item.day_of_week)
 
@@ -221,7 +230,7 @@ const transformScheduleItem = (item: ScheduleItem): z.infer<typeof tableSchema> 
     status: status,
     time: CLASS_TIMES[item.class_number - 1] || "",
     day: DAY_NAMES[item.day_of_week] || "",
-    parity: WEEK_TYPE_LABEL[item.week_type] || "",
+    parity: weekTypeToParity(item.week_type),
   }
 }
 

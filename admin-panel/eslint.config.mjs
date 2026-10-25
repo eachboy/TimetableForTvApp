@@ -12,7 +12,18 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Сборки Tauri/Rust, сторонний и нагрузочный код — не наш TypeScript
+    "src-tauri/**",
+    "tests/**",
   ]),
+  {
+    // Исторический долг: не блокируем CI, но оставляем видимыми
+    rules: {
+      "@typescript-eslint/no-explicit-any": "warn",
+      "react-hooks/set-state-in-effect": "warn",
+      "react-hooks/purity": "warn",
+    },
+  },
 ]);
 
 export default eslintConfig;

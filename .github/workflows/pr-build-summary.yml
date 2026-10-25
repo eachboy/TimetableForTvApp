@@ -1,0 +1,89 @@
+name: PR Build Summary
+
+on:
+  workflow_run:
+    workflows:
+      - "CI — Feature Branches"
+    types:
+      - completed
+
+permissions:
+  actions: read
+  pull-requests: write
+  contents: read
+
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Upsert PR build summary comment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const run = context.payload.workflow_run;
+            if (run.event !== 'pull_request' || !run.pull_requests || run.pull_requests.length === 0) {
+              core.info('Workflow run is not associated with a pull request. Skipping comment update.');
+              return;
+            }
+            const pr = run.pull_requests[0];
+            const prNumber = pr.number;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            const { data: artifactsData } = await github.rest.actions.listWorkflowRunArtifacts({
+              owner,
+              repo,
+              run_id: run.id,
+              per_page: 100,
+            });
+
+            const statusIcon = run.conclusion === 'success' ? '✅' : '❌';
+            const lines = [];
+            lines.push('<!-- pr-build-summary -->');
+            lines.push(`## ${statusIcon} CI build summary`);
+            lines.push('');
+            lines.push(`- **Workflow:** ${run.name}`);
+            lines.push(`- **Conclusion:** \`${run.conclusion || run.status}\``);
+            lines.push(`- **Run:** [Open workflow run](${run.html_url})`);
+            lines.push(`- **Commit:** \`${run.head_sha}\``);
+            lines.push('');
+
+            if (artifactsData.artifacts.length > 0) {
+              lines.push('### Artifacts');
+              for (const a of artifactsData.artifacts) {
+                lines.push(`- \`${a.name}\` (${a.size_in_bytes} bytes)`);
+              }
+            } else {
+              lines.push('### Artifacts');
+              lines.push('- No artifacts were uploaded in this run.');
+            }
+
+            const body = lines.join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner,
+              repo,
+              issue_number: prNumber,
+              per_page: 100,
+            });
+
+            const existing = comments.find((c) =>
+              c.user?.type === 'Bot' && c.body?.includes('<!-- pr-build-summary -->')
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: prNumber,
+                body,
+              });
+            }

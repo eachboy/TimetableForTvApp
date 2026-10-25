@@ -1,17 +1,62 @@
-# global
+# ───────────────────────── Секреты и локальные данные ─────────────────────────
+# Подпись обновлений Tauri (приватные ключи), ключи сопряжения, локальные БД.
 env/
 *.env
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+pairing.json
+admin-panel.json
 
-# admin-panel
+# ───────────────────────── Зависимости ─────────────────────────
+node_modules/
+# Корневые package*.json нужны только для shadcn MCP (локальный инструмент)
+/package.json
+/package-lock.json
 
-admin-panel/dist-build/
-admin-panel/dist-build.zip
-admin-panel/node_modules/
+# ───────────────────────── Сборки ─────────────────────────
+.next/
+out/
+dist-build/
+dist-build.zip
+build/
+coverage/
+*.tsbuildinfo
+next-env.d.ts
 
+# Rust / Tauri
+target/
+**/src-tauri/gen/
+frontend/src-tauri/binaries/
 
+# ───────────────────────── Рантайм-данные приложений ─────────────────────────
+# БД-сидов (frontend/src-tauri/timetable.db) это не касается — см. README, раздел «База данных»
+*.db-shm
+*.db-wal
+*.db-journal
+# Кэш погоды, который админка пишет при работе
+weather.json
+# Папка, ошибочно созданная вложенной сборкой
+admin-panel/src-tauri/src-tauri/
 
-# frontend
+# ───────────────────────── Локальные инструменты разработчика ─────────────────────────
+.claude/
+.mcp.json
+.playwright/
+.vscode/
+.idea/
+.vercel
+.graphify*/
+graphify-out/
 
-admin-panel/dist-build/
-admin-panel/dist-build.zip
-admin-panel/node_modules/
+# ───────────────────────── Логи и мусор ОС ─────────────────────────
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# ───────────────────────── Личные заметки ─────────────────────────
+TODO.md
+RELEASE.md

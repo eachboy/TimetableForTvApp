@@ -14,6 +14,8 @@ export default function ShedulePage() {
   const [selectedRoom, setSelectedRoom] = useState<Room | null>(null);
   const [loading, setLoading] = useState(true);
   const [isAnimating, setIsAnimating] = useState(false);
+  // Длительность CSS-перехода opacity в мс — должна совпадать с duration-* в JSX
+  const FADE_MS = 180;
   const lastActivityRef = useRef<number>(Date.now());
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -48,10 +50,11 @@ export default function ShedulePage() {
   const handleWeekChange = (week: number) => {
     if (week > 0 && !isAnimating) {
       setIsAnimating(true);
+      // Ждём полного затухания → меняем данные → запускаем появление
       setTimeout(() => {
         setCurrentWeek(week);
-        setTimeout(() => setIsAnimating(false), 300);
-      }, 150);
+        setTimeout(() => setIsAnimating(false), FADE_MS);
+      }, FADE_MS);
     }
   };
 
@@ -60,8 +63,8 @@ export default function ShedulePage() {
       setIsAnimating(true);
       setTimeout(() => {
         setSelectedRoom(room);
-        setTimeout(() => setIsAnimating(false), 300);
-      }, 150);
+        setTimeout(() => setIsAnimating(false), FADE_MS);
+      }, FADE_MS);
     }
   };
 
@@ -146,23 +149,22 @@ export default function ShedulePage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-white">
-        <div className="text-gray-600">Загрузка...</div>
+      <div className="min-h-screen flex items-center justify-center bg-zinc-950">
+        <div className="text-zinc-400">Загрузка...</div>
       </div>
     );
   }
 
   return (
-    <div className="h-screen bg-white flex flex-col overflow-hidden">
-      <ScheduleAppBar 
+    <div className="h-screen bg-zinc-950 flex flex-col overflow-hidden">
+      <ScheduleAppBar
         rooms={rooms}
         selectedRoom={selectedRoom}
         onRoomChange={handleRoomChange}
         currentWeek={currentWeek}
       />
-      <div className="w-full h-px bg-gray-300"></div>
-      <div className="flex-1 overflow-hidden p-4">
-        <div className={`w-full h-full transition-opacity duration-300 ${isAnimating ? 'opacity-0' : 'opacity-100'}`}>
+      <div className="flex-1 overflow-hidden p-3">
+        <div className={`w-full h-full transition-opacity duration-[180ms] ${isAnimating ? 'opacity-0' : 'opacity-100'}`}>
           <WeekScheduleTable
             rooms={rooms}
             scheduleItems={scheduleItems}

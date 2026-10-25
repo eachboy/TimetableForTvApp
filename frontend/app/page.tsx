@@ -2,54 +2,39 @@
 
 import { CurrentTime } from '@/components/current-time';
 import { MediaPlayer } from '@/components/media-player';
+import { Theather } from '@/components/theather';
 import { NewsTicker } from '@/components/news-ticker';
 import { ScheduleSidebar } from '@/components/schedule-sidebar';
-import { fetchMedia, fetchNews, fetchRooms, fetchSchedule, getClassTime, getCurrentWeekNumber, Media, News, Room, ScheduleItem } from '@/lib/api';
+import {
+  fetchMedia, fetchNews, fetchRooms, fetchSchedule,
+  getClassTime, getWeekTypeFromDate, isTauri, parseDateOnly,
+  Media, News, Room, ScheduleItem
+} from '@/lib/api';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
-
-function VideoPlayerWithGlow() {
-  const videoRef = useRef<HTMLVideoElement>(null);
-
-  // Принудительный запуск видео
-  useEffect(() => {
-    if (videoRef.current) {
-      const video = videoRef.current;
-      const playPromise = video.play();
-      if (playPromise !== undefined) {
-        playPromise.catch(() => {
-          // Игнорируем ошибки автозапуска
-        });
-      }
-    }
-  }, []);
-
-
-  return (
-    <div className="w-full">
-      <div 
-        className="relative w-full aspect-video bg-black rounded-lg overflow-hidden transition-all duration-300"
-      >
-        <video
-          ref={videoRef}
-          src="/video.mp4"
-          controls
-          className="w-full h-full"
-          autoPlay
-          muted
-          loop
-          playsInline
-        >
-          Ваш браузер не поддерживает видео.
-        </video>
-      </div>
-    </div>
-  );
-}
 
 interface RoomWithSchedule {
   room: Room;
   todayClasses: ScheduleItem[];
+  nearestDate?: string;
+}
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+
+async function waitForBackend(timeoutMs = 30_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${API_URL}/api/health`, { signal: AbortSignal.timeout(2000) });
+      if (res.ok) return true;
+    } catch (e) {
+      if (typeof console !== 'undefined' && console.debug) {
+        console.debug('[waitForBackend]', e);
+      }
+    }
+    await new Promise(r => setTimeout(r, 500));
+  }
+  return false;
 }
 
 export default function Home() {
@@ -59,189 +44,263 @@ export default function Home() {
   const [roomsWithSchedule, setRoomsWithSchedule] = useState<RoomWithSchedule[]>([]);
   const [news, setNews] = useState<News[]>([]);
   const [loading, setLoading] = useState(true);
+  const [backendStatus, setBackendStatus] = useState<'waiting' | 'ready' | 'timeout'>('waiting');
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Обработка навигации стрелками для перехода на страницу расписания
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         e.preventDefault();
         router.push('/shedule');
       }
     };
-
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [router]);
+  }, [router, mediaList.length]);
 
-  // Текущее медиа
   const currentMedia = mediaList.length > 0 ? mediaList[currentMediaIndex] : null;
 
-  // Функция для переключения на следующее медиа
   const handleNextMedia = useCallback(() => {
-    // Если медиа только одно, не переключаемся
     if (mediaList.length > 1) {
-      setCurrentMediaIndex((prevIndex) => (prevIndex + 1) % mediaList.length);
+      setCurrentMediaIndex((prev) => (prev + 1) % mediaList.length);
     }
   }, [mediaList.length]);
 
-  // Функция для загрузки данных
   const loadData = useCallback(async (showLoading = false) => {
     try {
-      if (showLoading) {
-        setLoading(true);
-      }
+      if (showLoading) setLoading(true);
+
       const [fetchedMediaList, roomsData, newsList] = await Promise.all([
         fetchMedia().catch(() => []),
         fetchRooms().catch(() => []),
         fetchNews(10).catch(() => []),
       ]);
-      
-      // Обновляем список медиа
+
       if (fetchedMediaList.length > 0) {
         setMediaList((prevList) => {
-          // Если список изменился, сбрасываем индекс на 0
           const prevIds = prevList.map(m => m.id).sort().join(',');
           const newIds = fetchedMediaList.map(m => m.id).sort().join(',');
-          if (prevIds !== newIds) {
-            setCurrentMediaIndex(0);
-          }
+          if (prevIds !== newIds) setCurrentMediaIndex(0);
           return fetchedMediaList;
         });
       } else {
         setMediaList([]);
         setCurrentMediaIndex(0);
       }
-      
-      // Для каждого кабинета находим все пары на сегодня
+
       const today = new Date();
-      const currentDayOfWeek = today.getDay() === 0 ? 6 : today.getDay() - 1;
-      const currentWeek = getCurrentWeekNumber();
-      const weekType = currentWeek % 2 === 0 ? 'even' : 'odd';
-      
+      today.setHours(0, 0, 0, 0);
+      const now = new Date();
+      // Пн=0 .. Вс=6 (для согласованного расчёта смещения до следующей пары)
+      const currentDayOfWeek = (today.getDay() + 6) % 7;
+
       const roomsWithTodayClasses: RoomWithSchedule[] = await Promise.all(
         roomsData.map(async (room) => {
           try {
             const scheduleItems = await fetchSchedule({ room_id: room.id }).catch(() => []);
-            
-            // Находим все пары на сегодня
-            const todayItems = scheduleItems
-              .filter(item => {
-                const startDate = new Date(item.start_date);
-                const endDate = new Date(item.end_date);
-                // Проверяем, что сегодня попадает в диапазон дат расписания
-                const isInDateRange = startDate <= today && endDate >= today;
-                // Проверяем, что день недели совпадает
-                const isToday = item.day_of_week === currentDayOfWeek;
-                // Проверяем тип недели
-                const isWeekTypeMatch = item.week_type === 'both' || item.week_type === weekType;
+            const candidates = scheduleItems
+              .map((item) => {
+                const startDate = parseDateOnly(item.start_date);
+                const endDate = parseDateOnly(item.end_date);
+                if (!startDate || !endDate) return null;
 
-                return isInDateRange && isToday && isWeekTypeMatch;
+                const timeRange = getClassTime(item.class_number);
+                const [startStr, endStr] = timeRange.split('-').map((s) => s.trim());
+                if (!startStr || !endStr) return null;
+
+                const itemDay = Number(item.day_of_week);
+                if (!Number.isFinite(itemDay) || itemDay < 0 || itemDay > 6) return null;
+
+                // Смещение до ближайшего наступления дня пары в календаре.
+                let dayOffset = (itemDay - currentDayOfWeek + 7) % 7;
+
+                const buildOccurrence = (offset: number) => {
+                  const date = new Date(today);
+                  date.setDate(date.getDate() + offset);
+
+                  const start = new Date(date);
+                  const [sh, sm] = startStr.split(':').map(Number);
+                  start.setHours(sh || 0, sm || 0, 0, 0);
+
+                  const end = new Date(date);
+                  const [eh, em] = endStr.split(':').map(Number);
+                  end.setHours(eh || 0, em || 0, 0, 0);
+
+                  return { start, end };
+                };
+
+                // Если пара уже закончилась сегодня — рассматриваем следующую неделю.
+                let occurrence = buildOccurrence(dayOffset);
+                if (dayOffset === 0 && occurrence.end <= now) {
+                  dayOffset += 7;
+                  occurrence = buildOccurrence(dayOffset);
+                }
+
+                // Проверяем диапазон дат предмета для найденного наступления.
+                const occurrenceDate = new Date(occurrence.start);
+                occurrenceDate.setHours(0, 0, 0, 0);
+                if (occurrenceDate < startDate || occurrenceDate > endDate) return null;
+
+                const normalizedWeekType = (item.week_type ?? '').toLowerCase();
+                const weekType = getWeekTypeFromDate(occurrenceDate);
+
+                // Если по чётности не подходит текущая неделя для этой даты —
+                // сдвигаем ещё на неделю (чётность сменится).
+                if (normalizedWeekType !== 'both' && normalizedWeekType !== weekType) {
+                  dayOffset += 7;
+                  occurrence = buildOccurrence(dayOffset);
+                  const shiftedDate = new Date(occurrence.start);
+                  shiftedDate.setHours(0, 0, 0, 0);
+                  if (shiftedDate < startDate || shiftedDate > endDate) return null;
+                }
+
+                return {
+                  item,
+                  start: occurrence.start,
+                };
               })
-              .sort((a, b) => a.class_number - b.class_number);
+              .filter((entry): entry is { item: ScheduleItem; start: Date } => entry !== null)
+              .sort((a, b) => a.start.getTime() - b.start.getTime());
 
-            // Выбираем ближайшую пару: первую, у которой ещё не закончился интервал,
-            // иначе — последнюю из списка (чтобы показать недавнюю, если все пары прошли)
-            let nearest: ScheduleItem | null = null;
-            if (todayItems.length > 0) {
-              const now = new Date();
-
-              const itemsWithTimes = todayItems.map(item => {
-                const timeRange = getClassTime(item.class_number); // "HH:MM - HH:MM"
-                const [startStr, endStr] = timeRange.split('-').map(s => s.trim());
-                const start = new Date(today);
-                const [sh, sm] = startStr.split(':').map(s => Number(s));
-                start.setHours(sh || 0, sm || 0, 0, 0);
-                const end = new Date(today);
-                const [eh, em] = endStr.split(':').map(s => Number(s));
-                end.setHours(eh || 0, em || 0, 0, 0);
-                return { item, start, end };
-              });
-
-              const upcoming = itemsWithTimes.find(x => x.end >= now) || null;
-              nearest = upcoming ? upcoming.item : itemsWithTimes[itemsWithTimes.length - 1].item;
-            }
+            const nearestEntry = candidates.length > 0 ? candidates[0] : null;
 
             return {
               room,
-              todayClasses: nearest ? [nearest] : [],
+              todayClasses: nearestEntry ? [nearestEntry.item] : [],
+              nearestDate: nearestEntry ? nearestEntry.start.toLocaleDateString('ru-RU') : undefined,
             };
-          } catch (err) {
-            return {
-              room,
-              todayClasses: [],
-            };
+          } catch {
+            return { room, todayClasses: [] };
           }
         })
       );
-      
       setRoomsWithSchedule(roomsWithTodayClasses);
       setNews(newsList);
     } catch (err) {
       console.error(err);
-      if (showLoading) {
-        setRoomsWithSchedule([]);
-      }
+      if (showLoading) setRoomsWithSchedule([]);
     } finally {
-      if (showLoading) {
-        setLoading(false);
-      }
+      if (showLoading) setLoading(false);
     }
   }, []);
 
-  // Первоначальная загрузка данных
+  // При монтировании: в Tauri бэкенд уже готов (окно показывают после wait_for_backend), иначе ждём /api/health
   useEffect(() => {
-    loadData(true);
+    let cancelled = false;
+    (async () => {
+      // В Tauri данные берутся из локальной БД, бэкенд не нужен
+      let inTauri = isTauri();
+      if (!inTauri) {
+        await new Promise((r) => setTimeout(r, 100));
+        inTauri = isTauri();
+      }
+      if (cancelled) return;
+      if (inTauri) {
+        setBackendStatus('ready');
+        await loadData(true);
+        return;
+      }
+      const ready = await waitForBackend(30_000);
+      if (cancelled) return;
+      if (ready) {
+        setBackendStatus('ready');
+        await loadData(true);
+      } else {
+        setBackendStatus('timeout');
+        setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
   }, [loadData]);
 
-  // Автоматическое обновление данных каждые 30 секунд
+  // Периодическое обновление каждые 30 секунд
   useEffect(() => {
-    const interval = setInterval(() => {
-      loadData(false); // Обновляем без показа loading
-    }, 30000); // 30 секунд
-
+    const interval = setInterval(() => loadData(false), 30_000);
     return () => clearInterval(interval);
   }, [loadData]);
 
-  if (loading) {
+  // Если бэкенд не ответил — повторяем попытку загрузки каждые 5 секунд
+  useEffect(() => {
+    if (backendStatus === 'timeout') {
+      retryTimerRef.current = setInterval(async () => {
+        const ready = await waitForBackend(3_000);
+        if (ready) {
+          setBackendStatus('ready');
+          clearInterval(retryTimerRef.current!);
+          loadData(true);
+        }
+      }, 5_000);
+    }
+    return () => {
+      if (retryTimerRef.current) clearInterval(retryTimerRef.current);
+    };
+  }, [backendStatus, loadData]);
+
+  if (loading || backendStatus === 'timeout') {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-black">
-        <div className="text-zinc-400">Загрузка...</div>
+      <div className="min-h-screen flex flex-col items-center justify-center bg-black gap-4 px-4">
+        <div className="text-zinc-400 text-lg text-center">
+          {backendStatus === 'waiting' && 'Подключение к серверу...'}
+          {backendStatus === 'ready' && 'Загрузка...'}
+          {backendStatus === 'timeout' && 'Бэкенд не запущен'}
+        </div>
+        {backendStatus === 'waiting' && (
+          <div className="text-zinc-600 text-sm">ожидание запуска backend</div>
+        )}
+        {backendStatus === 'timeout' && (
+          <>
+            <div className="text-zinc-500 text-sm text-center max-w-md">
+              Сервер не ответил за 30 сек. Повторная попытка выполняется автоматически.
+              <br />
+              Если не помогло — в папке приложения должен быть файл backend (exe).
+            </div>
+          </>
+        )}
       </div>
     );
   }
 
-  const displayNews = news.length > 0 ? news : [];
-
   return (
-    <div className="min-h-screen bg-black flex flex-col">
-      <div className="max-w-[1920px] mx-auto px-4 py-4 flex-1 flex flex-col">
-        {/* Надпись "интересное" и текущее время */}
-        <div className="mb-4 flex justify-between items-start">
+    <div className="h-screen overflow-hidden bg-black flex flex-col">
+      <div className="flex-1 min-h-0 flex flex-col px-4 py-4 max-w-[1920px] mx-auto w-full">
+
+        {/* Шапка */}
+        <div className="mb-4 flex justify-between align-center shrink-0">
           <h1 className="text-2xl font-bold text-white">интересное</h1>
+          
           <CurrentTime />
         </div>
-        <div className="flex gap-4 lg:flex-row flex-col lg:items-center flex-1">
-          {/* Основной контент (как видео на YouTube) */}
-          <div className="flex-1 min-w-0 flex items-center">
-            {currentMedia ? (
-              <MediaPlayer media={currentMedia} onNext={handleNextMedia} />
-            ) : (
-              <VideoPlayerWithGlow />
-            )}
+
+        {/* Основной контент */}
+        <div className="flex-1 flex lg:flex-row flex-col gap-4 min-h-0">
+
+          {/* Левая колонка — медиа, всегда занимает место */}
+          <div className="flex-1 min-w-0 flex flex-col justify-center">
+            {/* Контейнер с фиксированным соотношением сторон */}
+            <div className="relative w-full rounded-lg overflow-hidden" style={{ aspectRatio: '16/9' }}>
+              {currentMedia ? (
+                <MediaPlayer media={currentMedia} onNext={handleNextMedia} mediaCount={mediaList.length} />
+              ) : (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <span className="text-zinc-600 text-lg select-none">нет медиа</span>
+                </div>
+              )}
+            </div>
           </div>
 
-          {/* Разделительная линия */}
-          <div className="hidden lg:block w-px h-full min-h-[600px] bg-zinc-800 self-center"></div>
+          {/* Разделитель */}
+          <div className="hidden lg:block w-px bg-zinc-800 self-stretch shrink-0" />
 
-          {/* Боковая панель со списком следующих пар */}
-          <aside className="w-full lg:w-[402px] flex-shrink-0 flex items-center">
+          {/* Правая колонка — расписание */}
+          <div className="relative w-full lg:w-[402px] min-h-[320px] lg:min-h-0 shrink-0">
             <ScheduleSidebar roomsWithSchedule={roomsWithSchedule} />
-          </aside>
+          </div>
+
         </div>
       </div>
-      
-      {/* Полоска с новостями - внизу экрана без отступов */}
-      <NewsTicker news={displayNews} />
+
+      {/* Бегущая строка */}
+      <NewsTicker news={news} />
     </div>
   );
 }

@@ -34,8 +34,7 @@ import {
 } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Card, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
-import { getTeachers, createTeacher, deleteTeacher, getSchedule, getCurrentWeekType, type Teacher } from "@/lib/api"
-import { getClassTime, getDayName } from "@/lib/api"
+import { getTeachers, createTeacher, deleteTeacher, getSchedule, getCurrentWeekType, getClassTime, parseDateOnly, type Teacher, type ScheduleItem } from "@/lib/api"
 
 export default function TeachersPage() {
   const [teachers, setTeachers] = React.useState<Teacher[]>([])
@@ -58,26 +57,27 @@ export default function TeachersPage() {
       const schedules: Record<number, { nextClass?: string; room?: string; group?: string; subject?: string }> = {}
       const today = new Date()
       today.setHours(0, 0, 0, 0)
-      const currentDayOfWeek = today.getDay() === 0 ? 6 : today.getDay() - 1
+      // Пн=0 .. Сб=5; в воскресенье показываем следующий понедельник (все дни подходят)
+      const currentDayOfWeek = today.getDay() === 0 ? -1 : today.getDay() - 1
       const weekType = getCurrentWeekType()
 
       for (const teacher of teachersData) {
         try {
           const scheduleItems = await getSchedule({ teacher_id: teacher.id })
           
-          // Находим следующую пару (учитываем тип недели: чётная/нечётная)
+          const wt = (v: string) => (v ?? '').toLowerCase()
           const upcomingItems = scheduleItems
-            .filter(item => {
-              const startDate = new Date(item.start_date)
-              startDate.setHours(0, 0, 0, 0)
-              const endDate = new Date(item.end_date)
+            .filter((item: ScheduleItem) => {
+              const startDate = parseDateOnly(item.start_date)
+              const endDate = parseDateOnly(item.end_date)
+              if (!startDate || !endDate) return false
               endDate.setHours(23, 59, 59, 999)
               const inDateRange = startDate <= today && endDate >= today
               const isTodayOrLater = item.day_of_week >= currentDayOfWeek
-              const weekTypeMatch = item.week_type === 'both' || item.week_type === weekType
+              const weekTypeMatch = wt(item.week_type) === 'both' || wt(item.week_type) === weekType
               return inDateRange && isTodayOrLater && weekTypeMatch
             })
-            .sort((a, b) => {
+            .sort((a: ScheduleItem, b: ScheduleItem) => {
               if (a.day_of_week !== b.day_of_week) return a.day_of_week - b.day_of_week
               return a.class_number - b.class_number
             })
@@ -92,7 +92,7 @@ export default function TeachersPage() {
             }
           }
         } catch (err) {
-          // Игнорируем ошибки загрузки расписания
+          console.error(`Ошибка загрузки расписания для преподавателя ${teacher.name}:`, err)
         }
       }
       setTeacherSchedules(schedules)

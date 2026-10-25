@@ -29,7 +29,7 @@ import {
   ToggleGroupItem,
 } from "@/components/ui/toggle-group"
 import { useIsMobile } from "@/hooks/use-mobile"
-import { getMetricsHistory } from "@/lib/api"
+import { getMetricsHistory, type SystemMetricPoint } from "@/lib/api"
 
 export const description = "An interactive area chart"
 
@@ -66,7 +66,7 @@ export function ChartAreaInteractive() {
         const history = await getMetricsHistory(days)
         
         // Преобразуем данные в формат для графика
-        const formattedData = history.data.map((metric) => {
+        const formattedData = history.data.map((metric: SystemMetricPoint) => {
           const timestamp = new Date(metric.timestamp)
           const date = timestamp.toISOString().split("T")[0]
           const time = timestamp.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })

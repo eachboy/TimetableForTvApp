@@ -57,27 +57,6 @@
 
 ## Как это устроено
 
-```mermaid
-flowchart LR
-    subgraph TV["ТВ-компьютер (frontend, Tauri)"]
-        UI["Next.js UI (static export)"]
-        API["Rust API :8000<br/>axum + SQLite"]
-        UI --- API
-    end
-    subgraph PC["Компьютер администратора (admin-panel, Tauri)"]
-        AUI["Next.js UI"]
-        UPD["Update-сервер :9000<br/>latest.json + установщики"]
-        AUI --- UPD
-    end
-    GH[("GitHub Releases")]
-
-    AUI -- "зашифрованный канал tt-sc1<br/>(AES-256-GCM)" --> API
-    TV -- "mDNS: _timetable-api._tcp" -.-> PC
-    PC -- "mDNS: timetable-admin.local" -.-> TV
-    TV -- "автообновление (подпись minisign)" --> UPD
-    UPD -- "загрузка релиза" --> GH
-```
-
 1. **ТВ-приложение** — Tauri-оболочка над статически экспортированным Next.js. Внутри процесса поднимается API на порту `8000` и хранится SQLite-база в каталоге данных приложения. Анонсирует себя по mDNS как `timetable-tv.local`.
 2. **Панель управления** — Tauri-приложение для ПК администратора. Находит ТВ в сети, общается с ним по защищённому каналу и одновременно поднимает **update-сервер** на порту `9000` (`timetable-admin.local`).
 3. **Обновления** — панель скачивает релиз с GitHub, собирает `latest.json` в формате Tauri Updater и раздаёт его ТВ. ТВ проверяет подпись релиза встроенным публичным ключом.
